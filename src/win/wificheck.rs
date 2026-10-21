@@ -71,7 +71,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
     };
     print_inventory(&inv);
 
-    if !cfg.unattended && driver_step(&inv) {
+    let mut driver_log = Vec::new();
+    if !cfg.unattended && driver_step(&inv, &mut driver_log) {
         wait_key_exit();
         return Ok(());
     }
@@ -102,9 +103,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let (plan1, plan2) = (allowed.clone(), allowed);
     let unattended = cfg.unattended;
     let inv_json = serde_json::to_string_pretty(&inv).unwrap_or_default();
+    let driver_log: Vec<serde_json::Value> = driver_log.into_iter().map(Into::into).collect();
     let hooks = capture::Hooks {
         start: Box::new(move |app: Arc<App>| {
             app.session.write_text("sysinfo/wifi_inventory.json", &inv_json);
+            app.session.meta_set("driver_check", driver_log.into());
             app.session.meta_set("wifi_check_plan", plan1.iter().map(|e| serde_json::json!({"key": e.key, "label": e.label, "change": e.change.describe()})).collect::<Vec<_>>().into());
             let a = app.clone();
             let t = spawn("wifi-check", move || controller(a, plan1, secs, st1));
@@ -135,7 +138,7 @@ fn print_inventory(inv: &Inventory) {
 
 /// Driver version check and optional update through Windows Update. Returns true if the
 /// PC must restart before the check makes sense.
-fn driver_step(inv: &Inventory) -> bool {
+fn driver_step(inv: &Inventory, log: &mut Vec<String>) -> bool {
     let known = fixes::KNOWN_DRIVERS.iter().find(|k| inv.description.contains(k.0));
     let outdated = known.filter(|k| !inv.driver_version.is_empty() && fixes::version_lt(&inv.driver_version, k.1));
     match (known, outdated) {
@@ -144,11 +147,13 @@ fn driver_step(inv: &Inventory) -> bool {
         _ => {}
     }
     if !console::ask_yes_no("\nCheck Windows Update for newer Wi-Fi / Bluetooth drivers? (takes a minute or two)", true) {
+        log.push("Windows Update search skipped by user".into());
         return false;
     }
     println!("Searching Windows Update ...");
     match fixes::search_driver_updates() {
         Ok(list) if !list.is_empty() => {
+            log.push(format!("Windows Update offers: {}", list.iter().map(|u| u.title.as_str()).collect::<Vec<_>>().join("; ")));
             println!("Windows Update offers:");
             for u in &list {
                 println!("  - {} {DIM}({} {}){RESET}", u.title, u.class, u.date);
@@ -156,7 +161,9 @@ fn driver_step(inv: &Inventory) -> bool {
             if console::ask_yes_no("Install these now?", true) {
                 println!("Downloading and installing (Wi-Fi may drop for a moment) ...");
                 let ids: Vec<String> = list.iter().map(|u| u.id.clone()).collect();
-                match fixes::install_driver_updates(&ids) {
+                let r = fixes::install_driver_updates(&ids);
+                log.push(format!("install: {r:?}"));
+                match r {
                     Ok(true) => {
                         println!("{GREEN}{BOLD}Installed. Restart the PC now, then run LagScope again and choose 1 (Wi-Fi check).{RESET}");
                         return true;
@@ -170,6 +177,7 @@ fn driver_step(inv: &Inventory) -> bool {
             }
         }
         Ok(_) => {
+            log.push("Windows Update: no newer network/Bluetooth drivers".into());
             println!("Windows Update has no newer network or Bluetooth drivers for this PC.");
             if let Some(k) = outdated {
                 println!("{YELLOW}To install {} by hand:{RESET}", k.1);
@@ -180,7 +188,10 @@ fn driver_step(inv: &Inventory) -> bool {
                 println!("     Browse my computer > choose that folder. Restart, then run this check again.");
             }
         }
-        Err(e) => println!("{YELLOW}Windows Update search failed: {e:#}{RESET}"),
+        Err(e) => {
+            log.push(format!("Windows Update search failed: {e:#}"));
+            println!("{YELLOW}Windows Update search failed: {e:#}{RESET}");
+        }
     }
     false
 }

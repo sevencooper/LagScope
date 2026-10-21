@@ -236,7 +236,8 @@ impl Change {
                 ps(
                     r#"
 $n = $env:LS_ADAPTER
-foreach ($p in @($env:LS_PROPS | ConvertFrom-Json)) { Set-NetAdapterAdvancedProperty -Name $n -RegistryKeyword $p.k -RegistryValue $p.v -NoRestart }
+# (Windows PowerShell turns "[]" into one empty item, hence the check for .k)
+foreach ($p in @($env:LS_PROPS | ConvertFrom-Json)) { if ($p.k) { Set-NetAdapterAdvancedProperty -Name $n -RegistryKeyword $p.k -RegistryValue $p.v -NoRestart } }
 if ($env:LS_SS) { Set-NetAdapterPowerManagement -Name $n -SelectiveSuspend $env:LS_SS -NoRestart }
 Restart-NetAdapter -Name $n
 'done'"#,
@@ -246,7 +247,7 @@ Restart-NetAdapter -Name $n
             }
             Change::WifiDirect { ids } => ps(
                 &format!(
-                    "foreach ($id in @($env:LS_IDS | ConvertFrom-Json)) {{ {}-PnpDevice -InstanceId $id -Confirm:$false }}\n'done'",
+                    "foreach ($id in @($env:LS_IDS | ConvertFrom-Json)) {{ if ($id) {{ {}-PnpDevice -InstanceId $id -Confirm:$false }} }}\n'done'",
                     if on { "Disable" } else { "Enable" }
                 ),
                 &[("LS_IDS", &serde_json::to_string(ids).unwrap_or_default())],
