@@ -307,7 +307,11 @@ fn probe_loop(app: Arc<App>, target: Arc<Target>, sink: Arc<Sink>) {
         }
         row!(sink, "{t},{},{ip},{status},{rtt_us},{ttl}", target.label);
 
-        recent.push_back((t, (rtt_us >= 0).then_some(rtt_us as f64 / 1000.0)));
+        let rtt = (rtt_us >= 0).then_some(rtt_us as f64 / 1000.0);
+        if target.label == "gateway" {
+            app.gw_samples.lock().unwrap().push((t, rtt));
+        }
+        recent.push_back((t, rtt));
         while recent.front().is_some_and(|(rt, _)| *rt < t - 10_000_000) {
             recent.pop_front();
         }

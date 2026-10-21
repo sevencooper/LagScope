@@ -148,6 +148,17 @@ pub struct Verdict {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DriverCmdCorr {
+    pub what: String,
+    pub process: String,
+    /// Share of router-ping freezes preceded (within 1.5 s) by this command.
+    pub hit: f64,
+    /// Share expected by chance from how often the command occurs anyway.
+    pub chance: f64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Periodicity {
     pub what: String,
     pub period_s: f64,
@@ -172,6 +183,10 @@ pub struct Analysis {
     pub gap_correlation: BTreeMap<String, f64>,
     pub gateway_spike_correlation: BTreeMap<String, f64>,
     pub periodicity: Vec<Periodicity>,
+    /// Results of a Wi-Fi check session (test windows), if this was one.
+    pub wifi_check: Option<super::experiments::Outcome>,
+    /// Wi-Fi driver commands that repeatedly came right before router-ping freezes.
+    pub driver_cmds: Vec<DriverCmdCorr>,
     pub findings: Vec<String>,
     pub recommendations: Vec<String>,
     pub headline: String,
@@ -650,6 +665,49 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     Some(((p * 100.0).round() / 100.0, top, times.len()))
 }
 
+/// Driver commands (NDIS requests) that keep showing up just before router-ping freezes:
+/// tells whether something on the PC asks the Wi-Fi driver to do something each time.
+fn driver_cmd_correlation(d: &Data, an: &[Anomaly]) -> Vec<DriverCmdCorr> {
+    let spikes: Vec<i64> = an.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).map(|a| a.t).collect();
+    if spikes.len() < 5 || d.driver_cmds.is_empty() {
+        return vec![];
+    }
+    let mut by: BTreeMap<&str, (Vec<i64>, BTreeMap<u32, usize>)> = BTreeMap::new();
+    for (t, what, pid) in &d.driver_cmds {
+        let e = by.entry(what.as_str()).or_default();
+        e.0.push(*t);
+        *e.1.entry(*pid).or_default() += 1;
+    }
+    let names: BTreeMap<u32, &str> = d.proc_net.iter().map(|p| (p.pid, p.name.as_str())).collect();
+    let dur = (d.duration_us as f64 / 1e6).max(1.0);
+    let (before, after) = (1_500_000i64, 300_000i64);
+    let mut out: Vec<DriverCmdCorr> = by
+        .into_iter()
+        .filter_map(|(what, (mut ts, pids))| {
+            ts.sort_unstable();
+            let hits = spikes
+                .iter()
+                .filter(|&&s| {
+                    let i = ts.partition_point(|&x| x < s - before);
+                    ts.get(i).is_some_and(|&x| x <= s + after)
+                })
+                .count();
+            let hit = hits as f64 / spikes.len() as f64;
+            let chance = 1.0 - (-(ts.len() as f64 / dur) * (before + after) as f64 / 1e6).exp();
+            let pid = pids.into_iter().max_by_key(|p| p.1).map(|p| p.0).unwrap_or(0);
+            let process = match pid {
+                0 => "kernel".to_string(),
+                4 => "System".to_string(),
+                p => names.get(&p).map(|n| n.to_string()).unwrap_or(format!("pid {p}")),
+            };
+            (hit >= 0.6 && hit - chance >= 0.4).then(|| DriverCmdCorr { what: what.to_string(), process, hit, chance, count: ts.len() })
+        })
+        .collect();
+    out.sort_by(|a, b| (b.hit - b.chance).partial_cmp(&(a.hit - a.chance)).unwrap());
+    out.truncate(5);
+    out
+}
+
 fn near(an: &[Anomaly], kinds: &[Kind], target: Option<&str>, a: i64, b: i64) -> Vec<Anomaly> {
     an.iter()
         .filter(|x| x.counts() && kinds.contains(&x.kind) && target.is_none_or(|t| x.target == t) && x.overlaps(a, b))
@@ -879,6 +937,8 @@ pub fn analyze(d: &Data) -> Analysis {
         }
     }
 
+    res.wifi_check = super::experiments::from_session(d);
+    res.driver_cmds = driver_cmd_correlation(d, &an);
     res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1)).collect();
     res.anomalies = an;
     super::findings::summarize(d, &mut res);

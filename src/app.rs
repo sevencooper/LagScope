@@ -21,6 +21,12 @@ pub struct Config {
     pub open_report: bool,
     /// Extra ICMP targets to probe continuously.
     pub extra_targets: Vec<String>,
+    /// Wi-Fi check mode: seconds per test window (None = normal recording).
+    pub wifi_check: Option<u64>,
+    /// Wi-Fi check without questions: run all tests, no driver updates, keep nothing.
+    pub unattended: bool,
+    /// Wi-Fi check: run the tests even if the baseline shows no freezes.
+    pub force_tests: bool,
 }
 
 impl Default for Config {
@@ -35,6 +41,9 @@ impl Default for Config {
             zip: true,
             open_report: true,
             extra_targets: vec![],
+            wifi_check: None,
+            unattended: false,
+            force_tests: false,
         }
     }
 }
@@ -82,6 +91,10 @@ pub struct App {
     pub procs: RwLock<HashMap<u32, String>>,
     pub server: Mutex<Option<SocketAddr>>,
     pub live: Mutex<LiveData>,
+    /// Router ping results (send time, RTT ms or None if lost), for the Wi-Fi check.
+    pub gw_samples: Mutex<Vec<(i64, Option<f64>)>>,
+    /// Progress line shown in the status block during the Wi-Fi check.
+    pub check_status: Mutex<Option<String>>,
 }
 
 impl App {
@@ -95,6 +108,8 @@ impl App {
             procs: RwLock::new(HashMap::new()),
             server: Mutex::new(None),
             live: Mutex::new(LiveData::default()),
+            gw_samples: Mutex::new(Vec::new()),
+            check_status: Mutex::new(None),
         }
     }
 

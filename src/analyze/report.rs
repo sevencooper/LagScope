@@ -226,6 +226,7 @@ pub fn render(d: &Data, a: &Analysis) -> String {
         "phases": a.phases.iter().map(|(x, y)| [*x as f64 / 1e6, *y as f64 / 1e6]).collect::<Vec<_>>(),
         "beacons": a.beacons.iter().take(10).collect::<Vec<_>>(),
         "marks": d.marks.iter().map(|m| *m as f64 / 1e6).collect::<Vec<_>>(),
+        "wifi_check": a.wifi_check,
     });
     // Escape "</" so embedded strings cannot terminate the script tag.
     let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");

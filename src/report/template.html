@@ -61,6 +61,12 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   <div class="headline" id="headline"></div>
   <div class="grid" id="tiles"></div>
 
+  <div id="checkwrap" hidden>
+  <h2>Wi-Fi check</h2>
+  <div class="sub">Router ping during each test (one change at a time, everything restored afterwards). A freeze = ping above <span id="thr"></span> ms or lost.</div>
+  <div class="card tablewrap"><table id="check"><thead><tr><th>test</th><th>length</th><th>freezes</th><th>per minute</th><th>vs. baseline</th><th>ping p50 / p99 / max</th><th>lost</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
   <h2>Marked lag spikes</h2>
   <div class="sub">Each card judges the 4 s before the key press (falling back to 10 s, with low confidence). Click a card to zoom every chart to it.</div>
   <div class="marks" id="marks" style="margin-top:8px"></div>
@@ -109,6 +115,17 @@ $("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><div class="k">$
 
 $("findings").innerHTML = D.findings.map(f => `<li>${esc(f)}</li>`).join("") || "<li>No findings.</li>";
 $("recs").innerHTML = D.recommendations.map(f => `<li>${esc(f).replace(/`([^`]+)`/g, "<code>$1</code>")}</li>`).join("") || "<li>Nothing specific.</li>";
+
+if (D.wifi_check) {
+  const C = D.wifi_check;
+  $("checkwrap").hidden = false;
+  $("thr").textContent = C.threshold_ms.toFixed(0);
+  $("check").querySelector("tbody").innerHTML = C.windows.map(w => {
+    const tag = C.fixes.includes(w.key) ? " ✅ fixed" : C.partial.includes(w.key) ? " ↓ fewer" : "";
+    const vs = w.change_pct == null ? "" : (w.change_pct > 0 ? "+" : "") + w.change_pct.toFixed(0) + "%";
+    return `<tr><td>${esc(w.label)}${esc(tag)}</td><td>${w.secs.toFixed(0)} s</td><td>${w.spikes}</td><td>${w.per_min.toFixed(1)}</td><td>${vs}</td><td>${w.p50_ms.toFixed(1)} / ${w.p99_ms.toFixed(0)} / ${w.max_ms.toFixed(0)} ms</td><td>${w.lost}</td></tr>`;
+  }).join("");
+}
 
 $("marks").innerHTML = D.verdicts.map(v => `
   <div class="card mark" data-t="${v.t}">

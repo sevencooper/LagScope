@@ -36,6 +36,46 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         f.push("No game network stream was recorded (game not running, or not in a match).".into());
     }
 
+    // Wi-Fi check (test windows).
+    let mut check_headline = None;
+    if let Some(o) = &r.wifi_check {
+        f.extend(o.summary.iter().cloned());
+        for w in &o.windows {
+            f.push(format!(
+                "  test '{}': {} freezes in {:.0} s ({:.1}/min{}), router ping median {:.1} ms, p99 {:.0} ms, {} lost.",
+                w.label,
+                w.spikes,
+                w.secs,
+                w.per_min,
+                w.change_pct.map(|c| format!(", {c:+.0}% vs. baseline")).unwrap_or_default(),
+                w.p50_ms,
+                w.p99_ms,
+                w.lost
+            ));
+        }
+        if o.problem && o.fixes.is_empty() && o.partial.is_empty() {
+            rec.push(ROUTER_STEPS.into());
+        }
+        check_headline = Some(match (o.problem, o.fixes.first()) {
+            (false, _) => "Wi-Fi check: no regular freezes on the Wi-Fi link".to_string(),
+            (true, Some(k)) => format!(
+                "Wi-Fi check: the freezes stopped with \"{}\"",
+                o.windows.iter().find(|w| &w.key == k).map(|w| w.label.as_str()).unwrap_or(k)
+            ),
+            (true, None) => "Wi-Fi check: the freezes are not caused by a PC setting - most likely the router".to_string(),
+        });
+    }
+    for c in &r.driver_cmds {
+        f.push(format!(
+            "Windows driver command '{}' (from {}) came right before {} of the router-ping freezes ({} expected by chance, {} times in total): something on the PC asks the network driver to do this each time.",
+            c.what,
+            c.process,
+            pct(c.hit),
+            pct(c.chance),
+            c.count
+        ));
+    }
+
     // Probes.
     for p in &r.probes {
         if p.sent == 0 {
@@ -259,7 +299,9 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     for v in &r.verdicts {
         *cats.entry(v.category).or_default() += 1;
     }
-    let headline = if let Some(c) = clockwork {
+    let headline = if let Some(c) = check_headline {
+        c
+    } else if let Some(c) = clockwork {
         c
     } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
         format!("{n} of {} marked spikes point to: {}", r.verdicts.len(), category_text(cat))
@@ -284,6 +326,8 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     r.findings = f;
     r.recommendations = rec;
 }
+
+pub const ROUTER_STEPS: &str = "Router steps (the PC side is ruled out): 1) unplug the router/gateway for 30 s; 2) in its app or web page, give the 2.4 / 5 / 6 GHz bands separate network names and connect the PC to the 5 GHz one; 3) turn off extras that probe the network regularly (Wi-Fi motion sensing, band steering, 'smart' or auto channel, mesh/extender pods) one at a time; 4) set a fixed channel; 5) if it is an ISP gateway (e.g. Xfinity), ask for a replacement or use your own router.";
 
 pub fn category_text(cat: &str) -> &'static str {
     match cat {

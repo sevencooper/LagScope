@@ -7,6 +7,7 @@ pub mod console;
 pub mod cpu;
 pub mod dump;
 pub mod etw;
+pub mod fixes;
 pub mod frames;
 pub mod gpu;
 pub mod hotkey;
@@ -16,6 +17,7 @@ pub mod procwatch;
 pub mod stall;
 pub mod sysinfo;
 pub mod wifi;
+pub mod wificheck;
 pub mod wlan_etw;
 
 use std::sync::{Arc, Mutex};

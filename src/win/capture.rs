@@ -28,7 +28,19 @@ fn default_out_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Extra behaviour for special modes (the Wi-Fi check): a controller started after all
+/// collectors (and stopped before them), and a step run after recording stops but before
+/// the report is built.
+pub struct Hooks {
+    pub start: Box<dyn FnOnce(Arc<App>) -> Running>,
+    pub after_stop: Box<dyn FnOnce(&App)>,
+}
+
 pub fn run(cfg: Config) -> Result<()> {
+    run_with(cfg, None)
+}
+
+pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
     console::setup();
     let base = cfg.out_dir.clone().unwrap_or_else(default_out_dir);
     let session = Session::create(&base)?;
@@ -45,6 +57,7 @@ pub fn run(cfg: Config) -> Result<()> {
         serde_json::json!({
             "processes": cfg.processes, "hotkey": cfg.hotkey, "probe_hz": cfg.probe_hz,
             "probes": cfg.probes, "extra_targets": cfg.extra_targets, "duration_s": cfg.duration_s,
+            "wifi_check": cfg.wifi_check,
         }),
     );
     session.meta_set("logical_cpus", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0).into());
@@ -74,6 +87,7 @@ pub fn run(cfg: Config) -> Result<()> {
     }
     add("wifi", wifi::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     add("wlan_etw", super::wlan_etw::start(app.clone()));
+    add("wifi_driver", super::wlan_etw::start_ndis(app.clone()));
     add("stall", Ok(stall::start(app.clone())));
     add("cpu", cpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     add("gpu", gpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
@@ -81,6 +95,10 @@ pub fn run(cfg: Config) -> Result<()> {
     add("hotkey", hotkey::start(app.clone(), marker.clone()));
     add("console", Ok(console::start_input(app.clone(), marker)));
     add("sysinfo", Ok(sysinfo::start(app.clone())));
+    let after_stop = hooks.map(|h| {
+        add("wifi_check", Ok((h.start)(app.clone())));
+        h.after_stop
+    });
 
     // Flusher: push CSV buffers to disk every second.
     let a = app.clone();
@@ -92,10 +110,12 @@ pub fn run(cfg: Config) -> Result<()> {
 
     let started = Instant::now();
     let deadline = app.cfg.duration_s.map(|s| started + Duration::from_secs(s));
-    app.session.event(
-        "start",
-        format!("press {} (or M in this window) at every lag spike; Q to stop and build the report", app.cfg.hotkey),
-    );
+    if app.cfg.wifi_check.is_none() {
+        app.session.event(
+            "start",
+            format!("press {} (or M in this window) at every lag spike; Q to stop and build the report", app.cfg.hotkey),
+        );
+    }
     while !app.stopping() {
         ui::render(&status_lines(&app, started.elapsed()));
         std::thread::sleep(Duration::from_millis(500));
@@ -112,6 +132,9 @@ pub fn run(cfg: Config) -> Result<()> {
     }
     let _ = flusher.join();
     ui::deactivate();
+    if let Some(f) = after_stop {
+        f(&app);
+    }
     finalize(&app, started.elapsed());
     console::FINISHED.store(true, Ordering::SeqCst);
     println!("\nPress any key to close this window.");
@@ -174,16 +197,29 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
     out.push(format!(
         "{DIM}----------------------------------------------------------------------------------{RESET}"
     ));
-    out.push(format!(
-        "{BOLD}REC{RESET} {:02}:{:02}:{:02}   marks: {BOLD}{}{RESET}   [{}] / [M] mark lag spike   [Q] stop & build report",
-        secs / 3600,
-        (secs / 60) % 60,
-        secs % 60,
-        l.marks,
-        app.cfg.hotkey
-    ));
+    let check = app.cfg.wifi_check.is_some();
+    if check {
+        out.push(format!(
+            "{BOLD}WI-FI CHECK{RESET} {:02}:{:02}   {DIM}leave the PC alone until it finishes; [Q] aborts (settings are put back){RESET}",
+            secs / 60,
+            secs % 60
+        ));
+        if let Some(st) = app.check_status.lock().unwrap().clone() {
+            out.push(st);
+        }
+    } else {
+        out.push(format!(
+            "{BOLD}REC{RESET} {:02}:{:02}:{:02}   marks: {BOLD}{}{RESET}   [{}] / [M] mark lag spike   [Q] stop & build report",
+            secs / 3600,
+            (secs / 60) % 60,
+            secs % 60,
+            l.marks,
+            app.cfg.hotkey
+        ));
+    }
     let pid = app.game_pid.load(Ordering::Relaxed);
-    if pid == 0 {
+    if check {
+    } else if pid == 0 {
         out.push(format!("Game:   {YELLOW}waiting for {}{RESET}", app.cfg.processes.join(" / ")));
     } else {
         let server = app.server.lock().unwrap().map(|s| s.to_string()).unwrap_or("detecting...".into());

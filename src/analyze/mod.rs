@@ -2,6 +2,7 @@
 //! a friend's PC can be re-analysed anywhere with `lagscope analyze <dir>`).
 
 pub mod detect;
+pub mod experiments;
 pub mod findings;
 pub mod load;
 pub mod report;

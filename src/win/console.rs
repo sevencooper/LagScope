@@ -113,3 +113,42 @@ pub fn wait_key() {
         }
     }
 }
+
+/// Waits for one of `keys` (lower-case chars; Enter returns `enter` if given).
+pub fn read_choice(keys: &str, enter: Option<char>) -> char {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    unsafe {
+        let inp = GetStdHandle(STD_INPUT_HANDLE);
+        let mut rec: [INPUT_RECORD; 1] = std::mem::zeroed();
+        loop {
+            let mut n = 0u32;
+            if ReadConsoleInputW(inp, rec.as_mut_ptr(), 1, &mut n) == 0 {
+                // No interactive console: never treat that as consent.
+                return if keys.contains('n') { 'n' } else { 'q' };
+            }
+            if n != 1 || rec[0].EventType as u32 != KEY_EVENT || rec[0].Event.KeyEvent.bKeyDown == 0 {
+                continue;
+            }
+            let k = rec[0].Event.KeyEvent;
+            if k.wVirtualKeyCode == 0x0d {
+                if let Some(c) = enter {
+                    return c;
+                }
+            }
+            if let Some(c) = char::from_u32(k.uChar.UnicodeChar as u32).map(|c| c.to_ascii_lowercase()) {
+                if keys.contains(c) {
+                    return c;
+                }
+            }
+        }
+    }
+}
+
+/// "Question? [Y/n]" (Enter = default). Prints the answer.
+pub fn ask_yes_no(question: &str, default_yes: bool) -> bool {
+    print!("{question} {} ", if default_yes { "[Y/n]" } else { "[y/N]" });
+    let c = read_choice("yn", Some(if default_yes { 'y' } else { 'n' }));
+    println!("{}", if c == 'y' { "yes" } else { "no" });
+    c == 'y'
+}

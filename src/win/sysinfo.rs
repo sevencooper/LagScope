@@ -13,8 +13,15 @@ use crate::clock;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn run(cmd: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> String {
+pub(super) fn run(cmd: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> String {
+    run_env(cmd, args, stdin, timeout, &[])
+}
+
+/// Runs a System32 tool with extra environment variables (used to pass values to scripts
+/// without quoting them into the script text).
+pub(super) fn run_env(cmd: &str, args: &[&str], stdin: Option<&str>, timeout: Duration, env: &[(&str, &str)]) -> String {
     let mut c = Command::new(super::system32(cmd));
+    c.envs(env.iter().copied());
     c.args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -145,24 +152,25 @@ fn decode(b: &[u8]) -> String {
 const PS_SCRIPT: &str = r#"
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
-function H($t) { "`n===== $t =====" }
-H 'OS'; Get-CimInstance Win32_OperatingSystem | Format-List Caption,Version,BuildNumber,OSArchitecture,LastBootUpTime
-H 'Windows display version'; (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').DisplayVersion
-H 'Computer'; Get-CimInstance Win32_ComputerSystem | Format-List Manufacturer,Model,SystemType,TotalPhysicalMemory
-H 'CPU'; Get-CimInstance Win32_Processor | Format-List Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed
-H 'Board / BIOS'; Get-CimInstance Win32_BaseBoard | Format-List Manufacturer,Product,Version; Get-CimInstance Win32_BIOS | Format-List SMBIOSBIOSVersion,ReleaseDate
-H 'Memory modules'; Get-CimInstance Win32_PhysicalMemory | Format-Table -AutoSize Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber
-H 'GPU'; Get-CimInstance Win32_VideoController | Format-List Name,DriverVersion,DriverDate,CurrentRefreshRate,CurrentHorizontalResolution,CurrentVerticalResolution
-H 'Network adapters'; Get-NetAdapter -IncludeHidden | Format-List Name,InterfaceDescription,Status,LinkSpeed,MediaType,PhysicalMediaType,DriverVersionString,DriverDate,DriverProvider,NdisVersion,Virtual,Hidden
-H 'Adapter advanced properties'; Get-NetAdapterAdvancedProperty | Format-Table -AutoSize Name,DisplayName,DisplayValue
-H 'Adapter power management'; Get-NetAdapterPowerManagement | Format-List Name,AllowComputerToTurnOffDevice,DeviceSleepOnDisconnect,SelectiveSuspend,WakeOnMagicPacket
-H 'Adapter RSC / RSS'; Get-NetAdapterRsc | Format-Table -AutoSize Name,IPv4Enabled,IPv6Enabled; Get-NetAdapterRss | Format-Table -AutoSize Name,Enabled,NumberOfReceiveQueues
-H 'IP interfaces'; Get-NetIPInterface | Sort-Object InterfaceMetric | Format-Table -AutoSize InterfaceAlias,AddressFamily,InterfaceMetric,NlMtu,ConnectionState
-H 'Routes (default)'; Get-NetRoute -DestinationPrefix '0.0.0.0/0','::/0' | Format-Table -AutoSize InterfaceAlias,NextHop,RouteMetric
-H 'TCP settings'; Get-NetTCPSetting -SettingName Internet | Format-List AutoTuningLevelLocal,CongestionProvider,EcnCapability,Timestamps
-H 'QoS policies'; Get-NetQosPolicy | Format-List
-H 'DNS servers'; Get-DnsClientServerAddress -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias,ServerAddresses
-H 'Gaming-related registry'
+# (not "H": that is a built-in alias of Get-History and would win)
+function Section($t) { "`n===== $t =====" }
+Section 'OS'; Get-CimInstance Win32_OperatingSystem | Format-List Caption,Version,BuildNumber,OSArchitecture,LastBootUpTime
+Section 'Windows display version'; (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').DisplayVersion
+Section 'Computer'; Get-CimInstance Win32_ComputerSystem | Format-List Manufacturer,Model,SystemType,TotalPhysicalMemory
+Section 'CPU'; Get-CimInstance Win32_Processor | Format-List Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed
+Section 'Board / BIOS'; Get-CimInstance Win32_BaseBoard | Format-List Manufacturer,Product,Version; Get-CimInstance Win32_BIOS | Format-List SMBIOSBIOSVersion,ReleaseDate
+Section 'Memory modules'; Get-CimInstance Win32_PhysicalMemory | Format-Table -AutoSize Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber
+Section 'GPU'; Get-CimInstance Win32_VideoController | Format-List Name,DriverVersion,DriverDate,CurrentRefreshRate,CurrentHorizontalResolution,CurrentVerticalResolution
+Section 'Network adapters'; Get-NetAdapter -IncludeHidden | Format-List Name,InterfaceDescription,Status,LinkSpeed,MediaType,PhysicalMediaType,DriverVersionString,DriverDate,DriverProvider,NdisVersion,Virtual,Hidden
+Section 'Adapter advanced properties'; Get-NetAdapterAdvancedProperty | Format-Table -AutoSize Name,DisplayName,DisplayValue
+Section 'Adapter power management'; Get-NetAdapterPowerManagement | Format-List Name,AllowComputerToTurnOffDevice,DeviceSleepOnDisconnect,SelectiveSuspend,WakeOnMagicPacket
+Section 'Adapter RSC / RSS'; Get-NetAdapterRsc | Format-Table -AutoSize Name,IPv4Enabled,IPv6Enabled; Get-NetAdapterRss | Format-Table -AutoSize Name,Enabled,NumberOfReceiveQueues
+Section 'IP interfaces'; Get-NetIPInterface | Sort-Object InterfaceMetric | Format-Table -AutoSize InterfaceAlias,AddressFamily,InterfaceMetric,NlMtu,ConnectionState
+Section 'Routes (default)'; Get-NetRoute -DestinationPrefix '0.0.0.0/0','::/0' | Format-Table -AutoSize InterfaceAlias,NextHop,RouteMetric
+Section 'TCP settings'; Get-NetTCPSetting -SettingName Internet | Format-List AutoTuningLevelLocal,CongestionProvider,EcnCapability,Timestamps
+Section 'QoS policies'; Get-NetQosPolicy | Format-List
+Section 'DNS servers'; Get-DnsClientServerAddress -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias,ServerAddresses
+Section 'Gaming-related registry'
 $r = @{
  'GameDVR_Enabled'            = (Get-ItemProperty 'HKCU:\System\GameConfigStore').GameDVR_Enabled
  'AppCaptureEnabled'          = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR').AppCaptureEnabled
@@ -174,9 +182,9 @@ $r = @{
  'VBS running'                = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).VirtualizationBasedSecurityStatus
 }
 $r.GetEnumerator() | Sort-Object Name | Format-Table -AutoSize
-H 'Services of interest'; Get-Service | Where-Object { $_.Name -match 'Killer|ExitLag|GearUP|NoPing|WTFast|Rivet|SmartByte|Nahimic|Sonic|NordVPN|ProtonVPN|OpenVPN|WireGuard|Tailscale|ZeroTier|Hamachi|Radmin|WARP|Cloudflare|Asus|ROG|MSI|Lenovo|Razer|Corsair|Logi|Intel.*Connect|MediaTek|Realtek|Qualcomm' } | Format-Table -AutoSize Name,Status,StartType,DisplayName
-H 'Top processes by CPU time'; Get-Process | Sort-Object CPU -Descending | Select-Object -First 40 Name,Id,CPU,@{n='WS_MB';e={[int]($_.WorkingSet64/1MB)}},PriorityClass | Format-Table -AutoSize
-H 'Installed network-ish software'; Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -match 'VPN|Killer|ExitLag|GearUP|NoPing|WTFast|Booster|Network|Wi-?Fi|Wireless|Bluetooth|Nahimic|SmartByte|Armoury|Dragon Center|Vantage|Synapse|iCUE|G HUB|Afterburner|RivaTuner|Overwolf|Medal|OBS' } | Select-Object DisplayName,DisplayVersion,Publisher | Sort-Object DisplayName | Format-Table -AutoSize
+Section 'Services of interest'; Get-Service | Where-Object { $_.Name -match 'Killer|ExitLag|GearUP|NoPing|WTFast|Rivet|SmartByte|Nahimic|Sonic|NordVPN|ProtonVPN|OpenVPN|WireGuard|Tailscale|ZeroTier|Hamachi|Radmin|WARP|Cloudflare|Asus|ROG|MSI|Lenovo|Razer|Corsair|Logi|Intel.*Connect|MediaTek|Realtek|Qualcomm' } | Format-Table -AutoSize Name,Status,StartType,DisplayName
+Section 'Top processes by CPU time'; Get-Process | Sort-Object CPU -Descending | Select-Object -First 40 Name,Id,CPU,@{n='WS_MB';e={[int]($_.WorkingSet64/1MB)}},PriorityClass | Format-Table -AutoSize
+Section 'Installed network-ish software'; Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -match 'VPN|Killer|ExitLag|GearUP|NoPing|WTFast|Booster|Network|Wi-?Fi|Wireless|Bluetooth|Nahimic|SmartByte|Armoury|Dragon Center|Vantage|Synapse|iCUE|G HUB|Afterburner|RivaTuner|Overwolf|Medal|OBS' } | Select-Object DisplayName,DisplayVersion,Publisher | Sort-Object DisplayName | Format-Table -AutoSize
 "#;
 
 pub fn start(app: Arc<App>) -> Running {
@@ -207,10 +215,13 @@ pub fn start(app: Arc<App>) -> Running {
         if a.stopping() {
             return;
         }
+        // -EncodedCommand: a script piped through stdin runs line by line, which breaks
+        // multi-line statements.
+        let enc = super::fixes::encode_command(PS_SCRIPT);
         let ps = run(
             "WindowsPowerShell\\v1.0\\powershell.exe",
-            &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
-            Some(PS_SCRIPT),
+            &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &enc],
+            None,
             long,
         );
         a.session.write_text("sysinfo/system.txt", &redact(&ps));

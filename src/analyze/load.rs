@@ -175,6 +175,9 @@ pub struct Data {
     pub proc_net: Vec<ProcNet>,
     pub marks: Vec<i64>,
     pub events: Vec<Note>,
+    /// Commands Windows sent to the network drivers (NDIS OID requests, power requests):
+    /// (t, what, pid).
+    pub driver_cmds: Vec<(i64, String, u32)>,
     pub etw_lost: u64,
     pub files: Vec<String>,
 }
@@ -390,12 +393,38 @@ pub fn load(dir: &Path) -> Result<Data> {
             d.events.push(Note { t, kind: r.s("kind").to_string(), detail: r.s("detail").to_string() });
         }
     })?;
-    for name in ["etw_health", "etw_health_frames", "etw_health_wlan"] {
+    let present = each(dir, "wifi_driver", |r| {
+        if let Some(t) = r.i("t_us") {
+            let what = format!("{} {}", r.s("event"), r.s("oid")).trim().to_string();
+            d.driver_cmds.push((t, what, r.i("pid").unwrap_or(0) as u32));
+        }
+    })?;
+    seen("wifi_driver", present, &mut files);
+    for name in ["etw_health", "etw_health_frames", "etw_health_wlan", "etw_health_ndis"] {
         let mut lost = 0u64;
         each(dir, name, |r| lost = lost.max(r.i("events_lost").unwrap_or(0) as u64))?;
         d.etw_lost += lost;
     }
 
+    let windows: Vec<(i64, i64)> = {
+        let mut v = Vec::new();
+        let mut open = None;
+        for e in d.events.iter().filter(|e| e.kind == "exp") {
+            if e.detail.starts_with("start|") {
+                open = Some(e.t);
+            } else if let (true, Some(s)) = (e.detail.starts_with("end|"), open.take()) {
+                v.push((s, e.t));
+            }
+        }
+        v
+    };
+    if !windows.is_empty() {
+        // Wi-Fi check: between test windows the adapter is restarted on purpose, so those
+        // pings would show up as loss / spikes in the general statistics.
+        for v in d.probes.values_mut() {
+            v.retain(|p| windows.iter().any(|(s, e)| p.t >= *s && p.t < *e));
+        }
+    }
     for t in d.packets.last().map(|p| p.t).into_iter()
         .chain(d.frames.last().map(|f| f.0))
         .chain(d.cpu.last().map(|c| c.t))
