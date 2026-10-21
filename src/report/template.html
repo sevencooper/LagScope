@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LagScope report</title>
+<style>/*UPLOT_CSS*/</style>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --ink: #1d2330; --muted: #5d6677; --line: #e1e4ea;
+  --accent: #2f6fde; --bad: #d23c3c; --warn: #c98a12; --good: #2d9a5a;
+  --c1: #2f6fde; --c2: #d2552f; --c3: #2d9a5a; --c4: #8c4fd6; --c5: #c98a12; --c6: #0f9aa8;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #12151b; --card: #1b2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3340;
+    --accent: #6d9ef5; --c1: #6d9ef5; --c2: #f0845e; --c3: #5cc98a; --c4: #b48af0; --c5: #e3b34a; --c6: #45c4d1; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 28px 0 10px; }
+.sub { color: var(--muted); font-size: 13px; }
+.headline { font-size: 18px; font-weight: 600; padding: 16px 18px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--accent); margin: 18px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+ul { margin: 6px 0; padding-left: 20px; }
+li { margin: 3px 0; }
+.marks { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 10px; }
+.mark { cursor: pointer; }
+.mark:hover { border-color: var(--accent); }
+.mark h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.pill { font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.pill.high { color: var(--bad); border-color: var(--bad); }
+.pill.medium { color: var(--warn); border-color: var(--warn); }
+.ev { font-size: 12px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.charts .chart { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 8px 2px; margin-bottom: 8px; overflow-x: auto; }
+.chart .title { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 4px 2px; }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; position: sticky; top: env(safe-area-inset-top, 0px); background: var(--bg); padding: 6px 0; z-index: 5; }
+button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+.tablewrap { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+.u-legend { font-size: 12px; }
+.u-legend .u-marker { border-radius: 2px; }
+.uplot, .u-wrap { color: var(--ink); }
+details summary { cursor: pointer; color: var(--muted); }
+code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LagScope report</h1>
+  <div class="sub" id="sub"></div>
+  <div class="headline" id="headline"></div>
+  <div class="grid" id="tiles"></div>
+
+  <h2>Marked lag spikes</h2>
+  <div class="sub">Each card judges the 4 s before the key press (falling back to 10 s, with low confidence). Click a card to zoom every chart to it.</div>
+  <div class="marks" id="marks" style="margin-top:8px"></div>
+
+  <h2>Findings</h2>
+  <div class="card"><ul id="findings"></ul></div>
+  <h2>Suggestions</h2>
+  <div class="card"><ul id="recs"></ul></div>
+
+  <h2>Timeline</h2>
+  <div class="toolbar">
+    <button id="reset">Show whole session</button>
+    <span class="sub">Drag on a chart to zoom; double-click to reset. Red lines = your marks, orange = game stalls ≥100 ms, grey = outside match play.</span>
+  </div>
+  <div class="charts" id="charts"></div>
+
+  <h2>All detected events</h2>
+  <div class="card tablewrap"><table id="anoms"><thead><tr><th>time</th><th>event</th><th>value</th><th>detail</th></tr></thead><tbody></tbody></table></div>
+  <h2>Session log</h2>
+  <div class="card tablewrap"><table id="events"><thead><tr><th>time</th><th>kind</th><th>detail</th></tr></thead><tbody></tbody></table></div>
+  <details class="card"><summary>System details (meta.json)</summary><pre id="meta" style="white-space:pre-wrap;font-size:12px"></pre></details>
+  <div class="sub">LagScope {{VERSION}} · raw CSV data is in the session folder</div>
+</main>
+<script>/*UPLOT_JS*/</script>
+<script>
+const D = /*DATA*/;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtT = (s) => { const ds = Math.round(Math.max(0, s) * 10); const h = Math.floor(ds/36000), m = Math.floor(ds/600)%60, x = ((ds%600)/10).toFixed(1).padStart(4,"0"); return (h? h+":" : "") + String(m).padStart(2,"0") + ":" + x; };
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+$("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${(D.meta.config && D.meta.config.processes || []).join(", ")}`;
+$("headline").textContent = D.headline;
+
+const tiles = [];
+const gw = D.probes.find(p => p.target === "gateway");
+if (D.stream.in_packets) tiles.push(["Game stalls ≥100 ms", D.stream.gaps_100ms], ["Inbound packet rate", D.stream.in_rate_pps.toFixed(0) + "/s"], ["Inbound jitter", D.stream.jitter_ms.toFixed(1) + " ms"]);
+if (gw) tiles.push(["Router ping p50 / p99", gw.p50_ms.toFixed(1) + " / " + gw.p99_ms.toFixed(0) + " ms"], ["Router ping loss", (gw.sent ? gw.lost*100/gw.sent : 0).toFixed(2) + "%"]);
+const srv = D.probes.find(p => p.target === "server");
+if (srv && srv.sent && srv.lost < srv.sent) tiles.push(["Server-path ping p50", srv.p50_ms.toFixed(0) + " ms"]);
+if (D.beacons && D.beacons.length) tiles.push(["Game region ping p50 / max", D.beacons[0].p50_ms.toFixed(0) + " / " + D.beacons[0].max_ms.toFixed(0) + " ms"]);
+if (D.stream.match_s) tiles.push(["Match play", fmtT(D.stream.match_s)]);
+if (D.frames.frames) tiles.push(["Avg FPS / 1% low", D.frames.avg_fps.toFixed(0) + " / " + D.frames.low1_fps.toFixed(0)], ["Frame hitches ≥100 ms", D.frames.hitches_100ms]);
+tiles.push(["Marks", D.marks.length]);
+$("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+
+$("findings").innerHTML = D.findings.map(f => `<li>${esc(f)}</li>`).join("") || "<li>No findings.</li>";
+$("recs").innerHTML = D.recommendations.map(f => `<li>${esc(f).replace(/`([^`]+)`/g, "<code>$1</code>")}</li>`).join("") || "<li>Nothing specific.</li>";
+
+$("marks").innerHTML = D.verdicts.map(v => `
+  <div class="card mark" data-t="${v.t}">
+    <h3>#${v.n} at ${fmtT(v.t)} <span class="pill ${v.confidence}">${v.confidence} confidence</span></h3>
+    <div>${esc(v.culprit)}</div>
+    <div class="ev">${v.evidence.length ? v.evidence.map(esc).join("<br>") : "no anomalies in window"}</div>
+  </div>`).join("") || `<div class="sub">No marks in this session.</div>`;
+
+// Charts
+const S = D.series;
+const big = D.anomalies.filter(a => a.kind === "game inbound gap" && a.in_match && a.value >= 100).map(a => a.t);
+const linesPlugin = () => ({
+  hooks: { draw: [u => {
+    const ctx = u.ctx, top = u.bbox.top, h = u.bbox.height;
+    const line = (t, color, w) => { const x = u.valToPos(t, "x", true); if (x < u.bbox.left || x > u.bbox.left + u.bbox.width) return; ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + h); ctx.stroke(); };
+    ctx.save();
+    // Grey = outside match play (menus / loading / spectating).
+    if (D.phases.length) {
+      ctx.fillStyle = "rgba(128,128,128,0.12)";
+      const x0 = u.bbox.left, x1 = u.bbox.left + u.bbox.width;
+      const px = t => Math.min(x1, Math.max(x0, u.valToPos(t, "x", true)));
+      let prev = 0;
+      for (const [a, b] of [...D.phases, [D.duration_s, D.duration_s]]) { const l = px(prev), r = px(a); if (r > l) ctx.fillRect(l, top, r - l, h); prev = b; }
+    }
+    big.forEach(t => line(t, "rgba(230,140,30,0.45)", 1));
+    D.marks.forEach(t => line(t, "rgba(220,40,40,0.9)", 2));
+    ctx.restore();
+  }]}
+});
+const sync = uPlot.sync("lag");
+const charts = [];
+const W = () => Math.min(1240, $("charts").clientWidth - 18);
+function chart(title, series, opts = {}) {
+  const box = document.createElement("div"); box.className = "chart";
+  box.innerHTML = `<div class="title">${esc(title)}</div>`;
+  $("charts").appendChild(box);
+  const data = [S.t, ...series.map(s => s.data)];
+  if (series.every(s => !s.data || s.data.every(v => v == null))) { box.innerHTML += `<div class="sub" style="padding:6px">no data</div>`; return; }
+  const u = new uPlot({
+    width: W(), height: opts.height || 170,
+    cursor: { sync: { key: sync.key }, drag: { x: true, y: false } },
+    scales: { x: { time: false }, y: opts.y || {} },
+    axes: [
+      { stroke: css("--muted"), grid: { stroke: css("--line") }, values: (u, v) => v.map(fmtT) },
+      { stroke: css("--muted"), grid: { stroke: css("--line") }, size: 52, label: opts.unit || "" },
+    ],
+    series: [{ label: "time", value: (u, v) => v == null ? "-" : fmtT(v) }, ...series.map(s => ({
+      label: s.label, stroke: s.color, width: 1.25, spanGaps: s.span ?? false,
+      paths: s.points ? () => null : undefined, points: s.points ? { show: true, size: 6, fill: s.color } : { show: false },
+      value: (u, v) => v == null ? "-" : v + (s.unit || ""),
+    }))],
+    hooks: { setSelect: [u => { if (u.select.width > 0) { const a = u.posToVal(u.select.left, "x"), b = u.posToVal(u.select.left + u.select.width, "x"); zoom(a, b); u.setSelect({ width: 0, height: 0 }, false); } }] },
+    plugins: [linesPlugin()],
+  }, data, box);
+  sync.sub(u); charts.push(u);
+}
+const C = (n) => css("--c" + n);
+chart("Game traffic: longest gap between packets (ms)", [
+  { label: "server → you", data: S.in_gap, color: C(1), unit: " ms" },
+  { label: "you → server", data: S.out_gap, color: C(2), unit: " ms" },
+], { unit: "ms", y: { range: (u, mn, mx) => [0, Math.max(100, mx)] } });
+const pcolors = { gateway: C(1), hop2: C(2), internet: C(3), server: C(4) };
+const pser = Object.keys(S.probes).map((k, i) => ({ label: k, data: S.probes[k], color: pcolors[k] || C(5 + (i % 2)), unit: " ms" }));
+const lossSum = S.t.map((_, i) => { let s = 0, any = false; for (const k in S.loss) { if (S.loss[k][i]) { s += S.loss[k][i]; any = true; } } return any ? s : null; });
+if (S.region) pser.push({ label: "game region ping (UDP)", data: S.region, color: C(6), unit: " ms", points: true });
+chart("Ping round-trip time (max per interval)", pser, { unit: "ms", height: 200 });
+chart("Ping losses (count)", [{ label: "lost probes", data: lossSum, color: css("--bad"), points: true }], { height: 110 });
+chart("Frame time (worst per interval)", [{ label: "frame", data: S.frame, color: C(3), unit: " ms" }], { unit: "ms" });
+chart("Wi-Fi", [
+  { label: "link quality", data: S.quality, color: C(1), span: true },
+  { label: "RSSI dBm", data: S.rssi, color: C(2) },
+  { label: "TX rate Mbit/s", data: S.tx_rate, color: C(3) },
+]);
+chart("System stalls & CPU", [
+  { label: "stall max ms", data: S.stall, color: css("--bad"), unit: " ms" },
+  { label: "DPC+IRQ %", data: S.dpc, color: C(5), unit: "%" },
+  { label: "max core %", data: S.maxcore, color: C(4), unit: "%" },
+  { label: "GPU %", data: S.gpu, color: C(3), unit: "%" },
+]);
+chart("Traffic", [
+  { label: "game kbit/s", data: S.game_kbps, color: C(1) },
+  { label: "other apps Mbit/s", data: S.other_mbit, color: C(2) },
+]);
+function zoom(a, b) { charts.forEach(u => u.setScale("x", { min: a, max: b })); }
+$("reset").onclick = () => zoom(S.t[0], S.t[S.t.length - 1]);
+document.querySelectorAll(".mark").forEach(el => el.onclick = () => { const t = +el.dataset.t; zoom(t - 15, t + 5); $("charts").scrollIntoView({ behavior: "smooth" }); });
+window.addEventListener("resize", () => charts.forEach(u => u.setSize({ width: W(), height: u.height })));
+
+const tb = (id, rows) => { $(id).querySelector("tbody").innerHTML = rows.join(""); };
+const notable = D.anomalies.filter(a => !(a.kind === "game inbound gap" && a.value < 100) && !(a.kind === "frame hitch" && a.value < 50)).slice(0, 3000);
+tb("anoms", notable.map(a => `<tr><td>${fmtT(a.t)}</td><td>${esc(a.kind)}${a.target && a.target !== a.kind ? " · " + esc(a.target) : ""}</td><td>${(+a.value).toFixed(1)}</td><td>${esc(a.detail)}</td></tr>`));
+tb("events", D.events.map(e => `<tr><td>${fmtT(e.t)}</td><td>${esc(e.kind)}</td><td>${esc(e.detail)}</td></tr>`));
+$("meta").textContent = JSON.stringify(D.meta, null, 2);
+</script>
+</body>
+</html>
