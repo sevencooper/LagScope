@@ -347,7 +347,13 @@ fn results(app: &App, plan: &[Experiment], st: &Mutex<CheckState>, unattended: b
     }
     let finals = "Next: choose 2 in the LagScope menu and play a match or two, pressing F8 at every hiccup.";
     if st.skipped_no_problem || !o.problem {
-        println!("\n{GREEN}{BOLD}No regular Wi-Fi freezes right now.{RESET} {finals}");
+        println!("\n{GREEN}{BOLD}No regular Wi-Fi freezes right now.{RESET}");
+        if app.game_pid.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            println!("{YELLOW}The freeze may only happen while the game is running: start THE FINALS, stay in the main menu,");
+            println!("and run this check again (option 1). If that is clean too:{RESET} {finals}");
+        } else {
+            println!("{finals}");
+        }
         app.session.event("exp_result", "no problem found");
         return;
     }

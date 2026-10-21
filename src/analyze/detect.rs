@@ -926,7 +926,18 @@ pub fn analyze(d: &Data) -> Analysis {
     let end = d.duration_us;
     let series: Vec<(&str, Vec<i64>)> = vec![
         ("game inbound gaps ≥100 ms", gaps.iter().map(|g| g.t).collect()),
-        ("gateway ping spikes", an.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).map(|a| a.t).collect()),
+        // A freeze shows up as delayed pings or, with some drivers/routers, as lost ones.
+        ("gateway ping spikes/loss", {
+            let mut v: Vec<i64> = an
+                .iter()
+                .filter(|a| a.target == "gateway" && matches!(a.kind, Kind::ProbeSpike | Kind::ProbeLoss))
+                .map(|a| a.t)
+                .collect();
+            v.sort_unstable();
+            // One freeze = one event, even if it has both slow and lost pings.
+            v.dedup_by(|b, a| *b - *a < 1_000_000);
+            v
+        }),
         ("internet ping spikes", an.iter().filter(|a| a.target == "internet" && a.kind == Kind::ProbeSpike).map(|a| a.t).collect()),
         ("Wi-Fi scans", an.iter().filter(|a| a.kind == Kind::WifiScan).map(|a| a.t).collect()),
         ("frame hitches", an.iter().filter(|a| a.kind == Kind::FrameHitch && a.in_match).map(|a| a.t).collect()),

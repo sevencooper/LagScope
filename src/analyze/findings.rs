@@ -189,12 +189,14 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
                 v.get(v.len() / 2).copied().unwrap_or(0.0)
             };
             let gw_ms = median(r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).map(|a| a.value).collect());
+            let gw_lost = r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeLoss).count();
+            let gw_slow = r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).count();
+            let ping_txt = if gw_lost > gw_slow { "router pings get lost".to_string() } else { format!("router ping jumps to ~{gw_ms:.0} ms") };
             let gap_ms = median(r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match).map(|a| a.value).collect());
             let link = if is_wifi { "Wi-Fi link" } else { "link to the router" };
             f.push(format!(
-                "Clockwork pattern: every {:.1} s the {link} goes dead for a moment - router ping jumps to ~{:.0} ms and the game stream freezes for ~{:.0} ms, then the held-back packets arrive in one burst ({} of {} game stalls, both directions affected). Interference or a weak signal is never this regular: something on a fixed timer takes the link away{}.",
+                "Clockwork pattern: every {:.1} s the {link} goes dead for a moment - {ping_txt} and the game stream freezes for ~{:.0} ms, then the held-back packets arrive in one burst ({} of {} game stalls, both directions affected). Interference or a weak signal is never this regular: something on a fixed timer takes the link away{}.",
                 gwp.period_s,
-                gw_ms,
                 gap_ms,
                 pct(gwc),
                 s.gaps_100ms,

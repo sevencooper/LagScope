@@ -125,7 +125,7 @@ pub fn evaluate(samples: &[(i64, Option<f64>)], windows: &[Window]) -> Outcome {
     let mut summary = Vec::new();
     if !problem {
         summary.push(format!(
-            "No regular freezes on the Wi-Fi link during the check ({baseline_per_min:.1} per minute with nothing changed). If the game still feels laggy, record a match (menu option 2)."
+            "No regular freezes on the Wi-Fi link during the check ({baseline_per_min:.1} per minute with nothing changed). The freeze may only happen while the game runs: start THE FINALS, leave it in the main menu, and run the check again. If that is clean too, record a match (menu option 2)."
         ));
     } else {
         summary.push(format!(

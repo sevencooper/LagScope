@@ -40,7 +40,9 @@ A. Wi-Fi check & fix  (do this first - takes about 15 minutes)
       "Fix found: ..."  It asks "Keep this change permanently?"      -> press Y
                         (can be undone later, see "Undo" below)
       "The PC is not the cause"   -> it lists steps for the router (Wi-Fi box).
-      "No regular Wi-Fi freezes"  -> nothing to fix on the Wi-Fi right now.
+      "No regular Wi-Fi freezes"  -> start THE FINALS, leave it in the main menu
+                        (do not start a match), and do part A once more. If it is
+                        still clean, go on with part B.
 6. A report opens in your browser and a file named LagScope_....zip appears
    next to lagscope.exe. Keep it - you will send it at the end.
    Press any key to close the window.
