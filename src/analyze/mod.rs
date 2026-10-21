@@ -192,5 +192,9 @@ mod tests {
         assert!((p - 30.0).abs() < 1.0 && s >= 0.85, "{p} {s}");
         let random = [1, 7, 8, 30, 31, 77, 140, 141].map(|x: i64| x * 1_000_000);
         assert!(periodicity(&random, 200_000_000).is_none_or(|(_, s, _)| s < 0.9));
+        // An exact 10 s timer with a few events missing must not be reported as a multiple.
+        let t: Vec<i64> = (0..56).filter(|k| k % 9 != 4).map(|k| 2_050_000 + k * 10_000_000 + (k * 7919 % 40_000)).collect();
+        let (p, _, _) = periodicity(&t, 560_000_000).unwrap();
+        assert!((p - 10.0).abs() < 0.1, "{p}");
     }
 }

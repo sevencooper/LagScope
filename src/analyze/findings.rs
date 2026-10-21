@@ -128,13 +128,52 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     for p in &r.periodicity {
         f.push(format!("{} recur about every {:.1} s ({} events, {} match the period).", p.what, p.period_s, p.events, pct(p.score)));
     }
-    let scan_periodic = r.periodicity.iter().any(|p| p.what.contains("scan"));
-    let gap_periodic = r.periodicity.iter().find(|p| p.what.contains("inbound") || p.what.contains("gateway"));
+    let per = |what: &str| r.periodicity.iter().find(|p| p.what.starts_with(what));
+    let same_period = |a: f64, b: f64| (a / b - 1.0).abs() < 0.05;
+    let gap_per = per("game inbound").or(per("gateway"));
     let scan_corr = r.gap_correlation.get("Wi-Fi scan/roam/drop (±3 s)").copied().unwrap_or(0.0)
         .max(r.gateway_spike_correlation.get("Wi-Fi scan/roam/drop (±3 s)").copied().unwrap_or(0.0));
-    if is_wifi && (scan_corr >= 0.4 || (gap_periodic.is_some() && scan_periodic)) {
+    let scan_aligned = per("Wi-Fi scans").zip(gap_per).is_some_and(|(a, b)| same_period(a.period_s, b.period_s));
+    if is_wifi && (scan_corr >= 0.4 || (scan_aligned && scan_corr >= 0.2)) {
         f.push("Spikes line up with Wi-Fi background scanning: while scanning, the adapter leaves your channel for tens to hundreds of ms.".into());
         rec.push("To test the scan theory: in an admin terminal run `netsh wlan set autoconfig enabled=no interface=\"Wi-Fi\"` before playing (you stay connected but Windows stops background scans) and `netsh wlan set autoconfig enabled=yes interface=\"Wi-Fi\"` afterwards. Also close apps that ask for location/Wi-Fi lists.".into());
+    }
+
+    // A first-hop stall on an exact timer that also freezes the game stream.
+    let mut clockwork = None;
+    if let (Some(gwp), Some(gp)) = (per("gateway"), per("game inbound")) {
+        let gwc = r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0);
+        if gwp.score >= 0.8 && gwp.events >= 10 && same_period(gwp.period_s, gp.period_s) && gwc >= 0.6 {
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v.get(v.len() / 2).copied().unwrap_or(0.0)
+            };
+            let gw_ms = median(r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).map(|a| a.value).collect());
+            let gap_ms = median(r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match).map(|a| a.value).collect());
+            let link = if is_wifi { "Wi-Fi link" } else { "link to the router" };
+            f.push(format!(
+                "Clockwork pattern: every {:.1} s the {link} goes dead for a moment - router ping jumps to ~{:.0} ms and the game stream freezes for ~{:.0} ms, then the held-back packets arrive in one burst ({} of {} game stalls, both directions affected). Interference or a weak signal is never this regular: something on a fixed timer takes the link away{}.",
+                gwp.period_s,
+                gw_ms,
+                gap_ms,
+                pct(gwc),
+                s.gaps_100ms,
+                if scan_corr < 0.2 { ", and it is not Windows' own Wi-Fi scanning (none happened at those moments)" } else { "" }
+            ));
+            f.push("Short freezes this regular make the game keep a bigger safety buffer for late packets, so shots, hit markers and movement can feel delayed all the time, not only at the freeze itself.".into());
+            if is_wifi {
+                rec.push(format!(
+                    "Hunt the {:.0}-second timer, one change at a time: (1) update the Wi-Fi driver from the PC/motherboard maker or chipset vendor; (2) connect to the router's other band (5 GHz instead of 6 GHz, or the reverse); (3) temporarily turn off Bluetooth, Nearby sharing and Phone Link; (4) restart the router and check its app for features that probe the network periodically (band steering, mesh, motion sensing, auto channel). Each change can be checked in 2 minutes without playing: run LagScope at the desktop, press Q, and see whether the router ping still spikes every {:.0} s.",
+                    gwp.period_s, gwp.period_s
+                ));
+            }
+            clockwork = Some(format!(
+                "Every {:.1} s the {link} freezes for ~{:.0} ms and the game stream stalls with it: {}",
+                gwp.period_s,
+                gap_ms,
+                category_text(if is_wifi { "wifi" } else { "lan" })
+            ));
+        }
     }
     if r.gap_correlation.get("other traffic burst").copied().unwrap_or(0.0) >= 0.3 {
         let mut names: BTreeMap<String, usize> = BTreeMap::new();
@@ -220,7 +259,9 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     for v in &r.verdicts {
         *cats.entry(v.category).or_default() += 1;
     }
-    let headline = if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
+    let headline = if let Some(c) = clockwork {
+        c
+    } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
         format!("{n} of {} marked spikes point to: {}", r.verdicts.len(), category_text(cat))
     } else if s.gaps_100ms > 0 {
         let gwc = r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0);

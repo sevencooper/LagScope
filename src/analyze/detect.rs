@@ -586,22 +586,30 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     if times.len() < 5 {
         return None;
     }
+    let tol_of = |p: f64| (0.03 * p).max(0.75);
+    // Share of events followed by another one about `p` seconds later.
+    let score = |p: f64| -> Option<f64> {
+        let pu = (p * 1e6) as i64;
+        let tol = (tol_of(p) * 1e6) as i64;
+        let eligible: Vec<i64> = times.iter().copied().filter(|&t| t + pu + tol <= end).collect();
+        if eligible.len() < 4 {
+            return None;
+        }
+        let hits = eligible
+            .iter()
+            .filter(|&&t| {
+                let target = t + pu;
+                let i = times.partition_point(|&x| x < target - tol);
+                times.get(i).is_some_and(|&x| x <= target + tol)
+            })
+            .count();
+        Some(hits as f64 / eligible.len() as f64)
+    };
     let mut best: Vec<(f64, f64)> = Vec::new();
     let mut p = 3.0f64;
     while p <= 180.0 {
-        let pu = (p * 1e6) as i64;
-        let tol = ((0.03 * p).max(0.75) * 1e6) as i64;
-        let eligible: Vec<i64> = times.iter().copied().filter(|&t| t + pu + tol <= end).collect();
-        if eligible.len() >= 4 {
-            let hits = eligible
-                .iter()
-                .filter(|&&t| {
-                    let target = t + pu;
-                    let i = times.partition_point(|&x| x < target - tol);
-                    times.get(i).is_some_and(|&x| x <= target + tol)
-                })
-                .count();
-            best.push((p, hits as f64 / eligible.len() as f64));
+        if let Some(s) = score(p) {
+            best.push((p, s));
         }
         p += 0.25;
     }
@@ -613,17 +621,33 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     let first = best.iter().position(|b| b.1 >= top - 1e-9)?;
     let last = first + best[first..].iter().take_while(|b| b.1 >= top - 1e-9).count() - 1;
     let mut p = (best[first].0 + best[last].0) / 2.0;
-    // Prefer a fundamental over its multiples (an event every 30 s also matches 60 s).
-    for k in [4.0, 3.0, 2.0] {
-        let q = p / k;
-        if let Some(b) = best.iter().min_by(|a, b| (a.0 - q).abs().partial_cmp(&(b.0 - q).abs()).unwrap()) {
-            if (b.0 - q).abs() < 0.5 && b.1 >= top * 0.9 {
-                p = q;
-                break;
-            }
+    // Prefer the fundamental over its multiples (an event every 10 s also matches 30 s and
+    // 90 s): take the shortest p/k that scores nearly as well (missed events cost the fundamental
+    // more) and clearly beats chance.
+    let rate = times.len() as f64 / (end as f64 / 1e6).max(1.0);
+    for k in (2..=(p / 3.0) as usize).rev() {
+        let q = p / k as f64;
+        let chance = 1.0 - (-rate * 2.0 * tol_of(q)).exp();
+        if score(q).is_some_and(|s| s >= top * 0.75 && s - chance >= 0.5) {
+            p = q;
+            break;
         }
     }
-    Some(((p * 4.0).round() / 4.0, top, times.len()))
+    // Refine on the actual spacing of events (the scan grid above is only 0.25 s fine).
+    let tol = tol_of(p);
+    let mut est: Vec<f64> = times
+        .windows(2)
+        .filter_map(|w| {
+            let d = (w[1] - w[0]) as f64 / 1e6;
+            let m = (d / p).round();
+            (m >= 1.0 && m <= 3.0 && (d - m * p).abs() <= tol).then(|| d / m)
+        })
+        .collect();
+    if est.len() >= 3 {
+        est.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        p = est[est.len() / 2];
+    }
+    Some(((p * 100.0).round() / 100.0, top, times.len()))
 }
 
 fn near(an: &[Anomaly], kinds: &[Kind], target: Option<&str>, a: i64, b: i64) -> Vec<Anomaly> {
