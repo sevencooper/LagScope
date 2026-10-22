@@ -18,6 +18,8 @@ use crate::profile::{self, Profile};
 
 const LOG_LINES: usize = 400;
 const HISTORY: usize = 120;
+/// Frames drawn (self-test metric).
+static FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -105,6 +107,10 @@ struct SelfTest {
     idle_cpu: Option<(f64, f64)>,
     wait_until: f64,
     q_seen: Option<f64>,
+    /// CPU seconds at t=30 s (steady-state measurement while recording).
+    cpu30: Option<f64>,
+    frames30: u64,
+    threads30: Vec<(u32, String, f64)>,
 }
 
 struct GuiApp {
@@ -136,7 +142,7 @@ struct GuiApp {
     close_when_done: bool,
     selftest: Option<SelfTest>,
     /// Findings and suggestions of the last finished session (read once from analysis.json).
-    summary: Option<(PathBuf, Vec<String>, Vec<String>)>,
+    summary: Option<(PathBuf, Vec<String>, Vec<String>, Vec<HealthRow>)>,
     /// Re-analysis running in the background (sessions list reloads when it finishes).
     reanalyzing: Arc<std::sync::atomic::AtomicUsize>,
     net_router: JobRef<super::router::RouterInfo>,
@@ -149,7 +155,19 @@ struct GuiApp {
     comparison: Option<Result<crate::analyze::compare::Comparison, String>>,
 }
 
+/// One scorecard line from analysis.json: (area, status "ok"/"warn"/"na", text).
+type HealthRow = (String, String, String);
+
+fn read_health(a: &serde_json::Value) -> Vec<HealthRow> {
+    a["health"]
+        .as_array()
+        .map(|v| v.iter().map(|h| (h["area"].as_str().unwrap_or("").to_string(), h["status"].as_str().unwrap_or("").to_string(), h["text"].as_str().unwrap_or("").to_string())).collect())
+        .unwrap_or_default()
+}
+
 struct SessionRow {
+    /// Areas the scorecard flagged.
+    warn: Vec<String>,
     dir: PathBuf,
     name: String,
     when: String,
@@ -239,7 +257,7 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>, start_hidden: bool)
             }
             let selftest = selftest.map(|(scenario, out)| {
                 let _ = std::fs::create_dir_all(&out);
-                SelfTest { scenario, out, t0: Instant::now(), step: 0, shots: Vec::new(), cpu0: 0.0, idle_cpu: None, wait_until: 0.0, q_seen: None }
+                SelfTest { scenario, out, t0: Instant::now(), step: 0, shots: Vec::new(), cpu0: 0.0, idle_cpu: None, wait_until: 0.0, q_seen: None, cpu30: None, frames30: 0, threads30: Vec::new() }
             });
             let mut app = GuiApp {
                 shared: sh,
@@ -597,6 +615,7 @@ impl GuiApp {
                 meta["detected_games"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| profile::of_session(&meta).name)
             };
             self.sessions.push(SessionRow {
+                warn: read_health(&analysis).into_iter().filter(|h| h.1 == "warn").map(|h| h.0).collect(),
                 name: dir.file_name().unwrap().to_string_lossy().to_string(),
                 when: meta["start_local"].as_str().unwrap_or("").chars().take(16).collect(),
                 headline: analysis["headline"].as_str().unwrap_or("(no report)").to_string(),
@@ -613,8 +632,13 @@ impl GuiApp {
             ui.heading(RichText::new("LagScope").strong());
             ui.label(RichText::new(env!("CARGO_PKG_VERSION")).weak());
             ui.add_space(16.0);
-            for (t, name) in [(Tab::Record, "Record"), (Tab::WifiCheck, "Wi-Fi check"), (Tab::Network, "Network"), (Tab::Sessions, "Sessions")] {
-                if ui.selectable_label(self.tab == t, RichText::new(name).size(15.0)).clicked() {
+            for (t, name, tip) in [
+                (Tab::Record, "Record", "Record while you play, then get a report"),
+                (Tab::WifiCheck, "Wi-Fi fix", "Find the Wi-Fi setting that causes freezes"),
+                (Tab::Network, "Network", "Router, busy-connection and nearby Wi-Fi tests"),
+                (Tab::Sessions, "Reports", "Past recordings and tests"),
+            ] {
+                if ui.selectable_label(self.tab == t, RichText::new(name).size(15.0)).on_hover_text(tip).clicked() {
                     self.tab = t;
                     if t == Tab::Sessions {
                         self.load_sessions();
@@ -625,7 +649,7 @@ impl GuiApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.toggle_value(&mut self.show_log, "Log");
+                ui.toggle_value(&mut self.show_log, "Log").on_hover_text("Technical messages");
             });
         });
     }
@@ -645,8 +669,8 @@ impl GuiApp {
             self.live_view(ui, &app, &marker, started);
             return;
         }
-        ui.heading("Record while playing");
-        ui.label("LagScope watches the game's network traffic, your Wi-Fi, pings, frame times and drivers while you play. Press the mark key whenever it feels laggy; afterwards it builds a report that says where each hiccup came from.");
+        ui.heading("Record a game session");
+        ui.label(format!("Play as usual and press {} whenever it lags. The report tells you where the lag came from.", self.cfg.hotkey));
         ui.add_space(8.0);
         egui::Grid::new("recopts").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Game");
@@ -661,7 +685,7 @@ impl GuiApp {
                 }
             });
             ui.end_row();
-            ui.label("Mark key");
+            ui.label("Mark key").on_hover_text("Press it in game when you feel lag. Optional, but it helps the report.");
             egui::ComboBox::from_id_salt("hotkey").selected_text(self.cfg.hotkey.clone()).show_ui(ui, |ui| {
                 for k in ["F8", "F9", "F10", "F7", "Pause", "Ctrl+Shift+M"] {
                     ui.selectable_value(&mut self.cfg.hotkey, k.to_string(), k);
@@ -670,10 +694,12 @@ impl GuiApp {
             ui.end_row();
         });
         if !self.cfg.profile.hint.is_empty() {
-            ui.label(RichText::new(&self.cfg.profile.hint).weak());
+            hint(ui, &self.cfg.profile.hint);
         }
         ui.add_space(10.0);
-        if ui.add_enabled(!busy, egui::Button::new(RichText::new("  Start recording  ").size(18.0))).clicked() {
+        let has_result = mine && matches!(self.shared.lock().unwrap().task, Task::Done(_));
+        let start = if has_result { ui.add_enabled(!busy, egui::Button::new(RichText::new("New recording").size(15.0))) } else { big_button(ui, "Start recording", !busy) };
+        if start.clicked() {
             self.start_record(&ctx);
         }
         if mine {
@@ -681,15 +707,28 @@ impl GuiApp {
         }
         ui.add_space(14.0);
         ui.separator();
-        ui.label(RichText::new("Automatic recording").strong());
         let mut on = self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
         let games: Vec<&str> = self.profiles.iter().filter(|p| !p.is_auto()).map(|p| p.name.as_str()).collect();
-        if ui.checkbox(&mut on, format!("Record automatically whenever one of these games runs: {}", games.join(", "))).changed() {
+        if ui
+            .checkbox(&mut on, format!("Record automatically when I play {}", games.join(" or ")))
+            .on_hover_text("LagScope waits in the tray (next to the clock) and makes a report after each game. Reports show up under Reports.")
+            .changed()
+        {
             self.set_auto(&ctx, on);
         }
-        ui.label(RichText::new("LagScope then stays in the notification area (tray) when you close this window, records each game session and builds the report when the game exits.").weak());
         let mut st = self.startup_task;
-        if ui.add_enabled(on || st, egui::Checkbox::new(&mut st, "Start LagScope with Windows (hidden in the tray, auto-record on)")).changed() {
+        let startup_changed = ui.add_enabled(on || st, egui::Checkbox::new(&mut st, "Start with Windows")).on_hover_text("Starts hidden in the tray when you log in").changed();
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(RichText::new("Advanced").weak()).id_salt("advanced").show(ui, |ui| {
+            if ui
+                .add_enabled(!busy, egui::Checkbox::new(&mut self.cfg.kernel_trace, "Driver & disk tracing"))
+                .on_hover_text("Measures driver delays and disk activity. Turn off only if another tool (e.g. LatencyMon) needs the Windows kernel trace.")
+                .changed()
+            {
+                profile::set_setting("kernel_trace", self.cfg.kernel_trace.into());
+            }
+        });
+        if startup_changed {
             match set_startup_task(st) {
                 Ok(()) => {
                     self.startup_task = st;
@@ -726,38 +765,49 @@ impl GuiApp {
                         ui.label("Stopped after a few seconds: too short to analyse, nothing was saved.");
                         return;
                     }
-                    ui.label(RichText::new(&f.headline).size(16.0).strong());
-                    ui.label(RichText::new(f.dir.display().to_string()).weak());
+                    ui.add(egui::Label::new(RichText::new(&f.headline).size(17.0).strong().color(headline_color(ui, &f.headline))).wrap());
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if let Some(r) = &f.report {
-                            if ui.button("Open report").clicked() {
+                            if big_button(ui, "Open report", true).clicked() {
                                 super::open_path(r);
                             }
                         }
-                        if ui.button("Open folder").clicked() {
+                        if ui.button("Show files").on_hover_text(f.dir.display().to_string()).clicked() {
                             super::open_path(&f.dir);
                         }
                     });
                     if let Some(z) = &f.zip {
-                        ui.label(format!("To share it, send: {}", z.file_name().unwrap_or_default().to_string_lossy()));
+                        hint(ui, &format!("To share it, send {} from that folder.", z.file_name().unwrap_or_default().to_string_lossy()));
                     }
                 });
                 if self.summary.as_ref().is_none_or(|x| x.0 != f.dir) {
                     let a: serde_json::Value = std::fs::read_to_string(f.dir.join("analysis.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
                     let list = |k: &str| a[k].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-                    self.summary = Some((f.dir.clone(), list("findings"), list("recommendations")));
+                    self.summary = Some((f.dir.clone(), list("findings"), list("recommendations"), read_health(&a)));
                 }
-                if let Some((_, findings, recs)) = &self.summary {
+                if let Some((_, findings, recs, health)) = &self.summary {
+                    if !health.is_empty() {
+                        ui.add_space(6.0);
+                        scorecard(ui, health);
+                    }
                     if !recs.is_empty() {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Suggestions").strong());
-                        for r in recs {
+                        ui.label(RichText::new("What to try").strong());
+                        for r in recs.iter().take(3) {
                             ui.add(egui::Label::new(format!("• {}", r.replace('`', ""))).wrap());
+                        }
+                        if recs.len() > 3 {
+                            egui::CollapsingHeader::new(format!("{} more", recs.len() - 3)).id_salt("morerecs").show(ui, |ui| {
+                                for r in &recs[3..] {
+                                    ui.add(egui::Label::new(format!("• {}", r.replace('`', ""))).wrap());
+                                }
+                            });
                         }
                     }
                     if !findings.is_empty() {
                         ui.add_space(6.0);
-                        egui::CollapsingHeader::new(format!("Findings ({})", findings.len())).id_salt("findings").show(ui, |ui| {
+                        egui::CollapsingHeader::new(format!("Details ({})", findings.len())).id_salt("findings").show(ui, |ui| {
                             for x in findings {
                                 ui.add(egui::Label::new(format!("• {x}")).wrap());
                             }
@@ -811,30 +861,42 @@ impl GuiApp {
                     } else {
                         "no game traffic (menu?)".into()
                     };
-                    ui.label(format!("{} (pid {pid}) - server {server} - {net}", app.game_name()));
+                    ui.label(format!("{} - server {server} - {net}", app.game_name()));
                 }
                 ui.end_row();
                 ui.label(RichText::new("Frames").strong());
                 ui.label(if now - l.frames_updated_us < 2_500_000 { format!("{:.0} fps, worst frame {:.1} ms", l.fps, l.max_frame_ms) } else { "-".into() });
                 ui.end_row();
             }
-            ui.label(RichText::new("Ping").strong());
-            let ping: Vec<String> = ["gateway", "hop2", "internet", "server"]
+            ui.label(RichText::new("Ping").strong()).on_hover_text("Average / worst of the last 10 s.\nRouter: your Wi-Fi or cable. ISP: your provider. Internet: 1.1.1.1. Server: the game server.");
+            let ping: Vec<String> = [("gateway", "router"), ("hop2", "ISP"), ("internet", "internet"), ("server", "server")]
                 .iter()
-                .filter_map(|n| l.probes.get(*n).map(|p| format!("{n} {:.0}/{:.0} ms{}", p.avg_ms_10s, p.max_ms_10s, if p.lost_10s > 0 { format!(" ({} lost)", p.lost_10s) } else { String::new() })))
+                .filter_map(|(k, n)| l.probes.get(*k).map(|p| format!("{n} {:.0}/{:.0} ms{}", p.avg_ms_10s, p.max_ms_10s, if p.lost_10s > 0 { format!(" ({} lost)", p.lost_10s) } else { String::new() })))
                 .collect();
-            ui.label(if ping.is_empty() { "-".into() } else { format!("{}   (avg/max, last 10 s)", ping.join("   ")) });
+            ui.label(if ping.is_empty() { "-".into() } else { ping.join("   ") });
             ui.end_row();
             ui.label(RichText::new("Wi-Fi").strong());
             ui.label(l.wifi.clone().or(l.wifi_etw_quality.map(|q| format!("link quality {q}"))).unwrap_or_else(|| "-".into()));
             ui.end_row();
             ui.label(RichText::new("System").strong());
-            ui.label(format!("{}   {}", l.cpu.clone().unwrap_or_else(|| "-".into()), l.gpu.clone().unwrap_or_else(|| "-".into())));
+            let mut sys = format!("{}\n{}", l.cpu.clone().unwrap_or_else(|| "-".into()), l.gpu.clone().unwrap_or_else(|| "-".into()));
+            if let Some(t) = &l.top_cpu {
+                sys.push_str(&format!("\nbusy: {t}"));
+            }
+            ui.label(sys);
             ui.end_row();
-            ui.label(RichText::new("Drivers").strong());
-            ui.label(l.drivers.clone().map(|d| format!("DPC/ISR {d} (last 10 s)")).unwrap_or_else(|| "-".into()));
+            if let Some(dk) = &l.disk {
+                ui.label(RichText::new("Disk").strong());
+                ui.label(dk);
+                ui.end_row();
+            }
+            ui.label(RichText::new("Drivers").strong()).on_hover_text("Slowest driver work (DPC/ISR) in the last 10 s. Long runs make the whole PC hitch.");
+            ui.label(l.drivers.clone().unwrap_or_else(|| "-".into()));
             ui.end_row();
         });
+        if !check {
+            hint(ui, "You can minimise this window while you play: recording continues.");
+        }
         ui.add_space(8.0);
         let w = ui.available_width();
         let cols = if w > 760.0 { 2 } else { 1 };
@@ -843,7 +905,7 @@ impl GuiApp {
             ("Router ping (ms)", &self.h_router, 20.0, Color32::from_rgb(90, 160, 255)),
             ("Game: longest gap between packets (ms)", &self.h_gap, 100.0, Color32::from_rgb(255, 160, 70)),
             ("Worst frame time (ms)", &self.h_frame, 33.0, Color32::from_rgb(120, 210, 140)),
-            ("Worst driver DPC/ISR (ms)", &self.h_driver, 1.0, Color32::from_rgb(200, 140, 255)),
+            ("Slowest driver (ms)", &self.h_driver, 1.0, Color32::from_rgb(200, 140, 255)),
         ];
         egui::Grid::new("charts").num_columns(cols).spacing([12.0, 10.0]).show(ui, |ui| {
             for (i, (title, data, floor, color)) in charts.iter().enumerate() {
@@ -856,7 +918,6 @@ impl GuiApp {
                 }
             }
         });
-        ui.label(RichText::new(format!("Session folder: {}", app.session.dir.display())).weak());
     }
 
     fn wifi_tab(&mut self, ui: &mut egui::Ui) {
@@ -874,21 +935,20 @@ impl GuiApp {
             self.live_view(ui, &app, &marker, started);
             return;
         }
-        ui.heading("Wi-Fi check & fix");
-        ui.label("Run this at the desktop with games closed (about 15 minutes). LagScope measures your Wi-Fi with nothing changed, then switches suspect settings off one at a time (each for a minute, then put back exactly as it was) and shows which one removes the freezes. You are asked before anything is changed, and can keep the change that helped.");
+        ui.heading("Find the Wi-Fi setting that causes lag");
+        ui.label("For freezes that also happen outside games. Takes about 15 minutes; close your games and leave the PC alone.");
+        hint(ui, "Suspect settings are switched off one at a time for a minute, then put back. You are asked first, and nothing is kept unless you say so.");
         ui.add_space(8.0);
-        if ui.add_enabled(!busy, egui::Button::new(RichText::new("  Start Wi-Fi check  ").size(18.0))).clicked() {
+        if big_button(ui, "Start Wi-Fi fix", !busy).clicked() {
             self.start_check(&ctx, false, false, 60);
         }
         if self.shared.lock().unwrap().task_tab == Tab::WifiCheck {
             self.task_result(ui);
         }
-        ui.add_space(14.0);
-        ui.separator();
-        ui.label(RichText::new("Settings LagScope changed for you").strong());
-        if self.kept.is_empty() {
-            ui.label(RichText::new("None.").weak());
-        } else {
+        if !self.kept.is_empty() {
+            ui.add_space(14.0);
+            ui.separator();
+            ui.label(RichText::new("Changes you kept").strong());
             for c in &self.kept {
                 ui.label(format!("• {}", c.describe()));
             }
@@ -956,7 +1016,10 @@ impl GuiApp {
                 }
                 Some(Ok(r)) => {
                     ui.label(RichText::new(if r.name.is_empty() { "Unknown router".to_string() } else { r.name.clone() }).size(16.0).strong());
-                    ui.label(format!("Address {}{}", r.gateway, if r.isp_host.is_empty() { String::new() } else { format!("   ISP: {} ({})", if r.isp.is_empty() { "?" } else { &r.isp }, r.isp_host) }));
+                    let l = ui.label(format!("Address {}{}", r.gateway, if r.isp.is_empty() { String::new() } else { format!("   Provider: {}", r.isp) }));
+                    if !r.isp_host.is_empty() {
+                        l.on_hover_text(&r.isp_host);
+                    }
                     for n in &r.notes {
                         ui.add(egui::Label::new(format!("• {n}")).wrap());
                     }
@@ -966,10 +1029,15 @@ impl GuiApp {
         ui.add_space(10.0);
         ui.separator();
 
-        ui.heading("Latency under load (bufferbloat)");
-        ui.add(egui::Label::new("Downloads and uploads as fast as possible for about 12 s each (to Cloudflare's public speed test) while pinging your router and the internet. If latency jumps when the connection is busy, everyone's downloads and uploads will make games lag. Takes about 40 s and can use 1-2 GB of data on a fast line.").wrap());
+        ui.heading("Lag when the connection is busy");
+        hint(ui, "Fills your connection for about 30 s (Cloudflare speed test) and watches the ping. Uses up to 2 GB of data.");
         let load_running = self.net_load.lock().unwrap().running;
-        if ui.add_enabled(!load_running && !recording, egui::Button::new("Run latency-under-load test")).on_disabled_hover_text("Not while recording or another test runs").clicked() {
+        if ui
+            .add_enabled(!load_running && !recording, egui::Button::new("Run test"))
+            .on_hover_text("Also called a bufferbloat test")
+            .on_disabled_hover_text("Not while recording or another test runs")
+            .clicked()
+        {
             spawn_job(&self.net_load, &ctx, |status| super::loadtest::run(status));
         }
         let mut save = false;
@@ -1011,10 +1079,10 @@ impl GuiApp {
         ui.add_space(10.0);
         ui.separator();
 
-        ui.heading("Wi-Fi neighbourhood");
-        ui.add(egui::Label::new("Scans for nearby Wi-Fi networks and shows how crowded each channel is (names of other networks are not stored). The scan takes the Wi-Fi off its channel for a moment, so don't run it during a match.").wrap());
+        ui.heading("Nearby Wi-Fi");
+        hint(ui, "Shows how crowded your Wi-Fi channel is. Don't run it during a match: the scan briefly interrupts Wi-Fi.");
         let scan_running = self.net_scan.lock().unwrap().running;
-        if ui.add_enabled(!scan_running && !recording, egui::Button::new("Scan Wi-Fi neighbourhood")).clicked() {
+        if ui.add_enabled(!scan_running && !recording, egui::Button::new("Scan")).on_hover_text("Names of other networks are not stored").clicked() {
             spawn_job(&self.net_scan, &ctx, |status| {
                 status("Scanning (about 5 s) ...".into());
                 super::wifiscan::scan()
@@ -1031,7 +1099,7 @@ impl GuiApp {
                         ui.add(egui::Label::new(x).wrap());
                     }
                     for b in sc.bands.iter().filter(|b| !b.channels.is_empty()) {
-                        egui::CollapsingHeader::new(format!("{} - {} networks", b.band, b.networks)).id_salt(&b.band).default_open(b.band == sc.own_band).show(ui, |ui| {
+                        egui::CollapsingHeader::new(format!("{} - {} networks", b.band, b.networks)).id_salt(&b.band).show(ui, |ui| {
                             egui::Grid::new(format!("ch{}", b.band)).striped(true).num_columns(4).show(ui, |ui| {
                                 for h in ["channel", "networks", "strongest", "congestion"] {
                                     ui.label(RichText::new(h).weak());
@@ -1078,7 +1146,7 @@ impl GuiApp {
         if let Some(d) = self.net_saved.lock().unwrap().clone() {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Saved as {} (also in Sessions)", d.file_name().unwrap_or_default().to_string_lossy())).weak());
+                ui.label(RichText::new("Saved under Reports.").weak());
                 if ui.button("Open report").clicked() {
                     super::open_path(&d.join("report.html"));
                 }
@@ -1095,11 +1163,11 @@ impl GuiApp {
             self.load_sessions();
         }
         ui.horizontal(|ui| {
-            ui.heading("Sessions");
+            ui.heading("Reports");
             if ui.button("Refresh").clicked() {
                 self.load_sessions();
             }
-            if ui.button("Open folder").clicked() {
+            if ui.button("Show files").clicked() {
                 super::open_path(&capture::default_out(&self.cfg));
             }
         });
@@ -1111,7 +1179,7 @@ impl GuiApp {
             self.load_sessions();
         }
         if self.sessions.is_empty() {
-            ui.label("No recordings yet.");
+            ui.label("No reports yet. Record a game session and its report will appear here.");
             return;
         }
         if let Some(c) = &self.comparison {
@@ -1128,8 +1196,8 @@ impl GuiApp {
                     ui.add_space(6.0);
                     egui::Grid::new("cmp").num_columns(3).striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
                         ui.label("");
-                        ui.label(RichText::new(format!("A  {}", c.a_name)).strong());
-                        ui.label(RichText::new(format!("B  {}", c.b_name)).strong());
+                        ui.label(RichText::new("A (older)").strong()).on_hover_text(&c.a_name);
+                        ui.label(RichText::new("B (newer)").strong()).on_hover_text(&c.b_name);
                         ui.end_row();
                         for r in &c.rows {
                             ui.label(r.label);
@@ -1143,7 +1211,7 @@ impl GuiApp {
                             ui.end_row();
                         }
                     });
-                    ui.label(RichText::new("Green = B is better, red = B is worse.").weak());
+                    hint(ui, "Green = better in B, red = worse in B.");
                 }
                 Err(e) => {
                     ui.colored_label(Color32::LIGHT_RED, format!("Could not compare: {e}"));
@@ -1158,12 +1226,13 @@ impl GuiApp {
             return;
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Tick two sessions to compare them (e.g. before and after a fix).").weak());
-            if self.compare_pick.len() == 2 && ui.button("Compare").clicked() {
+            let ready = self.compare_pick.len() == 2;
+            if ui.add_enabled(ready, egui::Button::new("Compare")).on_disabled_hover_text("Tick two reports first").clicked() {
                 let mut pick = self.compare_pick.clone();
                 pick.sort();
                 self.comparison = Some(crate::analyze::compare::compare(&pick[0], &pick[1]).map_err(|e| format!("{e:#}")));
             }
+            hint(ui, "Tick two reports to see what changed, e.g. before and after a fix.");
         });
         let mut redo: Option<PathBuf> = None;
         let mut toggle: Option<PathBuf> = None;
@@ -1171,30 +1240,41 @@ impl GuiApp {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let mut on = self.compare_pick.contains(&r.dir);
-                    if ui.checkbox(&mut on, "").on_hover_text("Select for comparison").changed() {
-                        toggle = Some(r.dir.clone());
+                    if r.game == "Network test" {
+                        ui.add_space(ui.spacing().interact_size.y + ui.spacing().item_spacing.x);
+                    } else {
+                        let mut on = self.compare_pick.contains(&r.dir);
+                        if ui.checkbox(&mut on, "").on_hover_text("Tick two to compare").changed() {
+                            toggle = Some(r.dir.clone());
+                        }
                     }
                     ui.label(RichText::new(&r.when).strong());
                     ui.label(RichText::new(&r.game).weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Folder").on_hover_text(&r.name).clicked() {
-                            super::open_path(&r.dir);
-                        }
+                        ui.menu_button("More", |ui| {
+                            if ui.button("Show files").on_hover_text(&r.name).clicked() {
+                                super::open_path(&r.dir);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(r.dir.join("meta.json").exists(), egui::Button::new("Rebuild report"))
+                                .on_hover_text("Re-run the analysis with this version of LagScope")
+                                .clicked()
+                            {
+                                redo = Some(r.dir.clone());
+                                ui.close();
+                            }
+                        });
                         let report = r.dir.join("report.html");
-                        if ui.add_enabled(report.exists(), egui::Button::new("Report")).clicked() {
+                        if ui.add_enabled(report.exists(), egui::Button::new("Open report")).clicked() {
                             super::open_path(&report);
-                        }
-                        if ui
-                            .add_enabled(r.dir.join("meta.json").exists(), egui::Button::new("Re-analyze"))
-                            .on_hover_text("Rebuild the report with this version's analysis")
-                            .clicked()
-                        {
-                            redo = Some(r.dir.clone());
                         }
                     });
                 });
-                ui.add(egui::Label::new(&r.headline).wrap());
+                ui.add(egui::Label::new(RichText::new(&r.headline).color(headline_color(ui, &r.headline))).wrap());
+                if !r.warn.is_empty() {
+                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).small().color(Color32::from_rgb(235, 185, 90)));
+                }
             });
         }
         if let Some(dir) = toggle {
@@ -1335,7 +1415,10 @@ impl GuiApp {
                 shot(ctx, st, "02_recording");
                 st.step += 1;
             }
-            ("record", 3) if t > 28.0 => {
+            ("record", 3) if t > 30.0 => {
+                st.cpu30 = Some(cpu_secs());
+                st.threads30 = thread_times();
+                st.frames30 = FRAMES.load(std::sync::atomic::Ordering::Relaxed);
                 // Clone first: marking logs a line, and the log hook takes the same lock.
                 let marker = match &self.shared.lock().unwrap().task {
                     Task::Running { marker, .. } => Some(marker.clone()),
@@ -1348,6 +1431,17 @@ impl GuiApp {
             }
             ("record", 4) if t > 62.0 => {
                 st.idle_cpu = Some((cpu_secs() - st.cpu0, t - 2.0));
+                // Per-thread CPU since t=30 s (to find what costs CPU while recording).
+                let mut per: Vec<(f64, String)> = thread_times()
+                    .into_iter()
+                    .map(|(id, name, c)| (c - st.threads30.iter().find(|x| x.0 == id).map(|x| x.2).unwrap_or(0.0), name))
+                    .filter(|x| x.0 > 0.05)
+                    .collect();
+                per.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                crate::ui::log(format!("selftest: threads {}", per.iter().map(|(c, n)| format!("{n}={c:.2}s")).collect::<Vec<_>>().join(" ")));
+                if let Some(c30) = st.cpu30 {
+                    crate::ui::log(format!("selftest: steady-state cpu_pct_one_core={:.2} (t=30..{t:.0}), frames={}", (cpu_secs() - c30) / (t - 30.0) * 100.0, FRAMES.load(std::sync::atomic::Ordering::Relaxed) - st.frames30));
+                }
                 self.shared.lock().unwrap().stop = true;
                 st.step += 1;
             }
@@ -1392,7 +1486,13 @@ impl GuiApp {
             ("compare", 1) => {
                 self.tab = Tab::Sessions;
                 self.load_sessions();
-                let mut pick: Vec<PathBuf> = self.sessions.iter().take(2).map(|r| r.dir.clone()).collect();
+                self.compare_pick = self.sessions.iter().take(2).map(|r| r.dir.clone()).collect();
+                st.wait_until = t + 2.0;
+                st.step += 1;
+            }
+            ("compare", 2) if t > st.wait_until => {
+                shot(ctx, st, "02_list");
+                let mut pick = self.compare_pick.clone();
                 pick.sort();
                 if pick.len() == 2 {
                     self.comparison = Some(crate::analyze::compare::compare(&pick[0], &pick[1]).map_err(|e| format!("{e:#}")));
@@ -1400,8 +1500,8 @@ impl GuiApp {
                 st.wait_until = t + 2.0;
                 st.step += 1;
             }
-            ("compare", 2) if t > st.wait_until => {
-                shot(ctx, st, "02_compare");
+            ("compare", 3) if t > st.wait_until => {
+                shot(ctx, st, "03_compare");
                 st.step = 100;
             }
             ("network", 1) => {
@@ -1553,6 +1653,7 @@ impl eframe::App for GuiApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.save_screenshots(&ctx);
 
         let busy = self.shared.lock().unwrap().task.busy();
@@ -1583,6 +1684,49 @@ impl eframe::App for GuiApp {
         if busy {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+    }
+}
+
+/// The main action of a page: large and coloured.
+fn big_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+    let b = egui::Button::new(RichText::new(text).size(17.0).color(Color32::WHITE)).fill(Color32::from_rgb(38, 110, 190)).min_size(egui::vec2(170.0, 36.0));
+    ui.add_enabled(enabled, b)
+}
+
+/// The report's scorecard: a coloured dot, the area and a few words per line.
+fn scorecard(ui: &mut egui::Ui, rows: &[HealthRow]) {
+    egui::Grid::new("score").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+        for (area, status, text) in rows {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                let c = match status.as_str() {
+                    "ok" => Color32::from_rgb(110, 210, 120),
+                    "warn" => Color32::from_rgb(235, 185, 90),
+                    _ => ui.visuals().weak_text_color(),
+                };
+                ui.painter().circle_filled(r.center(), 4.5, c);
+                ui.label(RichText::new(area).strong());
+            });
+            let t = RichText::new(text);
+            ui.add(egui::Label::new(if status == "na" { t.weak() } else { t }).wrap());
+            ui.end_row();
+        }
+    });
+}
+
+/// Secondary explanation: dim, wrapped.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+}
+
+/// Green for a clean result, amber when the report found something.
+fn headline_color(ui: &egui::Ui, h: &str) -> Color32 {
+    if h.starts_with("No significant") || h.starts_with("No problems") {
+        Color32::from_rgb(110, 210, 120)
+    } else if h.starts_with("Network test") || h.starts_with('(') || h == "..." {
+        ui.visuals().text_color()
+    } else {
+        Color32::from_rgb(235, 185, 90)
     }
 }
 
@@ -1651,6 +1795,46 @@ fn cpu_secs() -> f64 {
     unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
     let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
     ft(k) + ft(u)
+}
+
+/// (thread id, name, CPU seconds) of this process's threads.
+fn thread_times() -> Vec<(u32, String, f64)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    use windows_sys::Win32::System::Threading::*;
+    let mut out = Vec::new();
+    unsafe {
+        let pid = GetCurrentProcessId();
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        let mut te: THREADENTRY32 = std::mem::zeroed();
+        te.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut ok = Thread32First(snap, &mut te) != 0;
+        while ok {
+            if te.th32OwnerProcessID == pid {
+                let h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, te.th32ThreadID);
+                if !h.is_null() {
+                    let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+                    let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+                    GetThreadTimes(h, &mut c, &mut e, &mut k, &mut u);
+                    let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+                    let mut name = format!("t{}", te.th32ThreadID);
+                    let mut p: windows_sys::core::PWSTR = std::ptr::null_mut();
+                    if GetThreadDescription(h, &mut p) >= 0 && !p.is_null() {
+                        let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+                        if len > 0 {
+                            name = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+                        }
+                        windows_sys::Win32::Foundation::LocalFree(p as _);
+                    }
+                    out.push((te.th32ThreadID, name, ft(k) + ft(u)));
+                    CloseHandle(h);
+                }
+            }
+            ok = Thread32Next(snap, &mut te) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
 }
 
 /// (working set, private bytes) in MB. The working set includes shared code pages of the

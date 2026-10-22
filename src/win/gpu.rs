@@ -73,6 +73,10 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                     "power_limit_w": d.enforced_power_limit().ok().map(|p| p as f64 / 1000.0),
                     "pcie_gen": d.current_pcie_link_gen().ok(),
                     "pcie_width": d.current_pcie_link_width().ok(),
+                    // Best link this card and slot can do (the link drops to gen 1 at idle).
+                    "max_pcie_gen": d.max_pcie_link_gen().ok(),
+                    "max_pcie_width": d.max_pcie_link_width().ok(),
+                    "default_power_limit_w": d.power_management_limit_default().ok().map(|p| p as f64 / 1000.0),
                 }));
                 devices.push(d);
             }
@@ -82,7 +86,7 @@ pub fn start(app: Arc<App>) -> Option<Running> {
         a.session.event("collector", format!("gpu: NVML driver {driver}, {} device(s)", devices.len()));
         let sink = a.session.sink(
             "gpu",
-            "t_us,gpu,util_pct,mem_util_pct,gfx_mhz,mem_mhz,power_w,power_limit_w,temp_c,pstate,reasons_hex,reasons,pcie_tx_kbs,pcie_rx_kbs,vram_used_mb,enc_pct,dec_pct",
+            "t_us,gpu,util_pct,mem_util_pct,gfx_mhz,mem_mhz,power_w,power_limit_w,temp_c,pstate,reasons_hex,reasons,pcie_tx_kbs,pcie_rx_kbs,vram_used_mb,enc_pct,dec_pct,pcie_gen,pcie_width",
         );
         let mut tick = 0u64;
         loop {
@@ -96,11 +100,13 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                 let u = d.utilization_rates().ok();
                 let r = d.current_throttle_reasons().ok();
                 // PCIe counters block ~20 ms each, so sample them at 1 Hz.
-                let (tx, rx) = if !fast || tick % 4 == 0 {
+                let pcie = !fast || tick % 4 == 0;
+                let (tx, rx) = if pcie {
                     (d.pcie_throughput(PcieUtilCounter::Send).ok(), d.pcie_throughput(PcieUtilCounter::Receive).ok())
                 } else {
                     (None, None)
                 };
+                let (link_gen, width) = if pcie { (d.current_pcie_link_gen().ok(), d.current_pcie_link_width().ok()) } else { (None, None) };
                 let o = |v: Option<u32>| v.map(|x| x.to_string()).unwrap_or_default();
                 let power = d.power_usage().ok().map(|p| p as f64 / 1000.0);
                 let limit = d.enforced_power_limit().ok().map(|p| p as f64 / 1000.0);
@@ -108,7 +114,7 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                 let pstate = d.performance_state().ok().map(|p| pstate_name(&format!("{p:?}"))).unwrap_or_default();
                 row!(
                     sink,
-                    "{t},{i},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                    "{t},{i},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                     o(u.as_ref().map(|u| u.gpu)),
                     o(u.as_ref().map(|u| u.memory)),
                     o(d.clock_info(Clock::Graphics).ok()),
@@ -124,20 +130,37 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                     d.memory_info().ok().map(|m| (m.used / 1048576).to_string()).unwrap_or_default(),
                     o(d.encoder_utilization().ok().map(|e| e.utilization)),
                     o(d.decoder_utilization().ok().map(|e| e.utilization)),
+                    o(link_gen),
+                    o(width),
                 );
                 if i == 0 {
                     a.live.lock().unwrap().gpu = Some(format!(
-                        "GPU {}%  {}  {}W/{}W  {}C  {}",
+                        "GPU {}%, {} of {} W, {} °C{}",
                         o(u.as_ref().map(|u| u.gpu)),
-                        pstate,
                         power.map(|p| format!("{p:.0}")).unwrap_or("?".into()),
                         limit.map(|p| format!("{p:.0}")).unwrap_or("?".into()),
                         o(temp),
-                        r.map(reasons_text).filter(|s| !s.is_empty()).unwrap_or_else(|| "no limits".into())
+                        // Only limits that cost performance; the power cap is normal at idle.
+                        r.filter(|r| r.intersects(ThrottleReasons::HW_SLOWDOWN | ThrottleReasons::SW_THERMAL_SLOWDOWN | ThrottleReasons::HW_THERMAL_SLOWDOWN | ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN))
+                            .map(|r| format!(", slowed down ({})", reasons_text(r)))
+                            .unwrap_or_default()
                     ));
                 }
             }
         }
     });
     Some(Running::threads("gpu", vec![t]))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Reads the link and power-limit facts the hardware checks use (skips without NVIDIA).
+    #[test]
+    fn nvml_link_facts() {
+        let Some(nvml) = super::load() else { return };
+        let d = nvml.device_by_index(0).unwrap();
+        let (lg, width) = (d.max_pcie_link_gen().unwrap(), d.max_pcie_link_width().unwrap());
+        assert!((1..=6).contains(&lg) && [1, 2, 4, 8, 16].contains(&width), "gen {lg} x{width}");
+        println!("max PCIe {lg}.0 x{width}, now {:?} x{:?}, power limit {:?} of default {:?} mW", d.current_pcie_link_gen(), d.current_pcie_link_width(), d.enforced_power_limit(), d.power_management_limit_default());
+    }
 }

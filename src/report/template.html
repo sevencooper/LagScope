@@ -24,6 +24,11 @@ h2 { font-size: 16px; margin: 28px 0 10px; }
 .sub { color: var(--muted); font-size: 13px; }
 .headline { font-size: 18px; font-weight: 600; padding: 16px 18px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--accent); margin: 18px 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.score { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; margin: -6px 0 18px; }
+.score div { display: flex; gap: 8px; align-items: baseline; }
+.score .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; transform: translateY(1px); }
+.score .ok .dot { background: var(--good); } .score .warn .dot { background: var(--warn); } .score .na .dot { background: var(--line); }
+.score b { white-space: nowrap; } .score .na { color: var(--muted); }
 .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .tile .k { color: var(--muted); font-size: 12px; }
 .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -59,6 +64,9 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   <h1>LagScope report</h1>
   <div class="sub" id="sub"></div>
   <div class="headline" id="headline"></div>
+  <div class="score" id="score"></div>
+  <div id="recwrap"><h2>What to try</h2>
+  <div class="card"><ul id="recs"></ul></div></div>
   <div class="grid" id="tiles"></div>
 
   <div id="checkwrap" hidden>
@@ -73,8 +81,6 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
 
   <h2>Findings</h2>
   <div class="card"><ul id="findings"></ul></div>
-  <h2>Suggestions</h2>
-  <div class="card"><ul id="recs"></ul></div>
 
   <h2>Timeline</h2>
   <div class="toolbar">
@@ -106,6 +112,16 @@ const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v
 
 $("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${D.meta.wifi_check_plan ? "none (Wi-Fi check)" : (D.meta.profile && !(D.meta.profile.processes || []).length ? ((D.meta.detected_games || []).join(", ") || "auto-detect (no game found)") : ((D.meta.profile && D.meta.profile.name) || (D.meta.config && D.meta.config.processes || []).join(", ")))}`;
 $("headline").textContent = D.headline;
+for (const h of (D.health || [])) {
+  const div = document.createElement("div");
+  div.className = h.status;
+  const dot = document.createElement("span"); dot.className = "dot";
+  const b = document.createElement("b"); b.textContent = h.area;
+  const t = document.createElement("span"); t.textContent = h.text;
+  div.append(dot, b, t);
+  $("score").append(div);
+}
+if (!(D.recommendations || []).length) $("recwrap").hidden = true;
 
 const tiles = [];
 const gw = D.probes.find(p => p.target === "gateway");

@@ -256,8 +256,11 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if let Some(name) = d.meta["router"]["name"].as_str().filter(|n| !n.is_empty()) {
         f.push(format!("Router: {name} at {}.", d.meta["router"]["gateway"].as_str().unwrap_or("?")));
     }
-    driver_findings(d, r, &mut f, &mut rec);
-    disk_findings(d, r, &mut f, &mut rec);
+    let drivers = driver_findings(d, r, &mut f, &mut rec);
+    let disk = disk_findings(d, r, &mut f, &mut rec);
+    let mut checks = super::health::system_findings(d, r, &mut f, &mut rec);
+    checks.drivers = drivers;
+    checks.disk = disk;
     if count(Kind::GpuLimit) > 0 {
         f.push("The GPU hit thermal / hardware slowdown limits during the session.".into());
     }
@@ -345,12 +348,15 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     r.headline = headline;
     r.findings = f;
     r.recommendations = rec;
+    r.health = super::health::scorecard(d, r, &checks);
+    r.background_cpu = checks.background;
+    r.hitch_procs = checks.hitch_procs;
 }
 
 /// Disk activity summary and whether frame hitches line up with the game loading from disk.
-fn disk_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) {
+fn disk_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) -> Option<(bool, String)> {
     if d.disk_1s.is_empty() {
-        return;
+        return None;
     }
     let peak = d.disk_1s.iter().map(|s| s.read_mb).fold(0.0, f64::max);
     let peak_w = d.disk_1s.iter().map(|s| s.write_mb).fold(0.0, f64::max);
@@ -371,25 +377,28 @@ fn disk_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<Stri
             if slow_c > 0.0 { format!(", {} with a slow disk I/O", pct(slow_c)) } else { String::new() }
         ));
         rec.push("Stutter comes with the game loading data from disk: install the game on an SSD (ideally NVMe), keep some free space on it, close memory-hungry programs (browsers) while playing, and expect the first matches after a game or driver update to stutter more while shader caches rebuild.".into());
+        return Some((true, format!("{} of hitches while the game loaded from disk", pct(paging))));
     } else if slow >= 5 {
         rec.push(format!("{slow} disk I/Os took 100 ms or more: the drive was very busy (antivirus scan, Windows Update, downloads) or may be failing. Check what else uses the disk while playing."));
+        return Some((true, format!("{slow} very slow disk reads/writes")));
     }
+    Some((false, format!("slowest I/O {slowest:.0} ms, game loaded {fault_mb:.0} MB")))
 }
 
 /// LatencyMon-style summary of driver DPC/ISR times, plus what they coincided with.
-fn driver_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) {
-    let Some(list) = d.meta["driver_latency"]["drivers"].as_array() else { return };
+fn driver_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) -> Option<(bool, String)> {
+    let list = d.meta["driver_latency"]["drivers"].as_array()?;
     if r.wifi_check.is_some() {
         // The check restarts the Wi-Fi adapter on purpose, which makes drivers busy.
         f.push("Driver latency is not judged in a Wi-Fi check (the check restarts the Wi-Fi adapter on purpose); record a normal session for that.".into());
-        return;
+        return None;
     }
     let worst = |v: &serde_json::Value| v["dpc_max_us"].as_f64().unwrap_or(0.0).max(v["isr_max_us"].as_f64().unwrap_or(0.0));
     // Judge on "effective" time: graphics drivers get 1 ms of extra allowance (their 1-2 ms
     // DPCs under gaming load are normal).
     let name = |v: &serde_json::Value| v["driver"].as_str().unwrap_or("?").to_string();
     let effective = |v: &serde_json::Value| (worst(v) - (super::detect::driver_threshold_us(&name(v)) - super::detect::DRIVER_US)).max(0.0);
-    let Some(top) = list.iter().max_by(|a, b| effective(a).partial_cmp(&effective(b)).unwrap()) else { return };
+    let top = list.iter().max_by(|a, b| effective(a).partial_cmp(&effective(b)).unwrap())?;
     let top_us = effective(top);
     let names: Vec<String> = list
         .iter()
@@ -448,6 +457,8 @@ fn driver_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<St
             worst(top) / 1000.0
         ));
     }
+    let warn = top_us >= 1000.0 && !rare;
+    Some((warn, format!("worst {} {:.1} ms{}", name(top), worst(top) / 1000.0, if long > 0 { format!(", {long} long runs") } else { String::new() })))
 }
 
 pub const ROUTER_STEPS: &str = "Router steps (the PC side is ruled out): 1) unplug the router/gateway for 30 s; 2) in its app or web page, give the 2.4 / 5 / 6 GHz bands separate network names and connect the PC to the 5 GHz one; 3) turn off extras that probe the network regularly (Wi-Fi motion sensing, band steering, 'smart' or auto channel, mesh/extender pods) one at a time; 4) set a fixed channel; 5) if it is an ISP gateway (e.g. Xfinity), ask for a replacement or use your own router.";

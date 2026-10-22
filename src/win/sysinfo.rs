@@ -187,10 +187,33 @@ Section 'Top processes by CPU time'; Get-Process | Sort-Object CPU -Descending |
 Section 'Installed network-ish software'; Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -match 'VPN|Killer|ExitLag|GearUP|NoPing|WTFast|Booster|Network|Wi-?Fi|Wireless|Bluetooth|Nahimic|SmartByte|Armoury|Dragon Center|Vantage|Synapse|iCUE|G HUB|Afterburner|RivaTuner|Overwolf|Medal|OBS' } | Select-Object DisplayName,DisplayVersion,Publisher | Sort-Object DisplayName | Format-Table -AutoSize
 "#;
 
+/// Hardware facts the analyzer checks (RAM sticks, graphics drivers, drives, a few
+/// Windows settings), as one JSON object.
+const HW_SCRIPT: &str = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+function Day($d) { if ($d) { $d.ToString('yyyy-MM-dd') } else { $null } }
+$cs = Get-CimInstance Win32_ComputerSystem
+$sys = $env:SystemDrive.TrimEnd(':')
+$vol = Get-Volume -DriveLetter $sys
+$dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard
+[ordered]@{
+ pc_type = [int]$cs.PCSystemType
+ bios_date = Day (Get-CimInstance Win32_BIOS).ReleaseDate
+ memory = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [ordered]@{ gb = [math]::Round($_.Capacity / 1GB); speed = [int]$_.Speed; configured = [int]$_.ConfiguredClockSpeed; type = [int]$_.SMBIOSMemoryType; maker = "$($_.Manufacturer)".Trim(); part = "$($_.PartNumber)".Trim(); slot = "$($_.DeviceLocator)".Trim() } })
+ gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { [ordered]@{ name = $_.Name; driver = $_.DriverVersion; driver_date = Day $_.DriverDate } })
+ disks = @(Get-PhysicalDisk | ForEach-Object { [ordered]@{ name = $_.FriendlyName; media = "$($_.MediaType)"; bus = "$($_.BusType)"; gb = [math]::Round($_.Size / 1GB); letters = @(Get-Partition -DiskNumber $_.DeviceId | Where-Object { "$($_.DriveLetter)" -match '^[A-Z]$' } | ForEach-Object { "$($_.DriveLetter)" }) } })
+ system_drive = [ordered]@{ letter = $sys; free_gb = [math]::Round($vol.SizeRemaining / 1GB, 1); size_gb = [math]::Round($vol.Size / 1GB) }
+ background_recording = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR').HistoricalCaptureEnabled
+ memory_integrity = [bool]($dg.SecurityServicesRunning -contains 2)
+} | ConvertTo-Json -Depth 4 -Compress
+"#;
+
 pub fn start(app: Arc<App>) -> Running {
     let a = app.clone();
     let t = spawn("sysinfo", move || {
         let t0 = Instant::now();
+        quick_facts(&a);
         let long = Duration::from_secs(60);
         let short = Duration::from_secs(15);
         let jobs: Vec<(&str, &str, Vec<&str>)> = vec![
@@ -225,6 +248,20 @@ pub fn start(app: Arc<App>) -> Running {
             long,
         );
         a.session.write_text("sysinfo/system.txt", &redact(&ps));
+        if a.stopping() {
+            return;
+        }
+        let hw = run(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &super::fixes::encode_command(HW_SCRIPT)],
+            None,
+            short,
+        );
+        match serde_json::from_str::<serde_json::Value>(hw.trim()) {
+            Ok(v) => a.session.meta_set("hardware", v),
+            Err(_) => a.session.event("collector", format!("sysinfo: hardware query failed: {}", hw.trim().chars().take(200).collect::<String>())),
+        }
+        power_plan(&a);
         summarize_wlan(&a);
         // Router / ISP identification (local network only, plus one reverse DNS lookup).
         if let Some(gw) = super::probes::route_to(std::net::Ipv4Addr::new(1, 1, 1, 1)).and_then(|r| r.gateway) {
@@ -239,6 +276,64 @@ pub fn start(app: Arc<App>) -> Running {
         a.session.event("collector", format!("sysinfo: snapshot written ({:.1}s)", t0.elapsed().as_secs_f64()));
     });
     Running::threads("sysinfo", vec![t])
+}
+
+/// Displays (current and best refresh rate) and installed RAM, into meta.json.
+fn quick_facts(app: &App) {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut ms: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    ms.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut ms) } != 0 {
+        app.session.meta_set("ram_mb", (ms.ullTotalPhys / 1_048_576).into());
+    }
+    let mut displays = Vec::new();
+    for i in 0.. {
+        let mut dd: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+        dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), i, &mut dd, 0) } == 0 {
+            break;
+        }
+        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
+            continue;
+        }
+        let mode = |n: u32| {
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            (unsafe { EnumDisplaySettingsW(dd.DeviceName.as_ptr(), n, &mut dm) } != 0).then_some(dm)
+        };
+        let Some(cur) = mode(ENUM_CURRENT_SETTINGS) else { continue };
+        // Best refresh rate offered at the current resolution.
+        let mut max_hz = cur.dmDisplayFrequency;
+        for n in 0..2000 {
+            let Some(m) = mode(n) else { break };
+            if m.dmPelsWidth == cur.dmPelsWidth && m.dmPelsHeight == cur.dmPelsHeight {
+                max_hz = max_hz.max(m.dmDisplayFrequency);
+            }
+        }
+        let mut mon: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+        mon.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        let monitor = if unsafe { EnumDisplayDevicesW(dd.DeviceName.as_ptr(), 0, &mut mon, 0) } != 0 { super::from_wide_buf(&mon.DeviceString) } else { String::new() };
+        displays.push(serde_json::json!({
+            "monitor": monitor,
+            // The graphics adapter the screen is plugged into.
+            "adapter": super::from_wide_buf(&dd.DeviceString),
+            "primary": dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
+            "width": cur.dmPelsWidth,
+            "height": cur.dmPelsHeight,
+            "hz": cur.dmDisplayFrequency,
+            "max_hz": max_hz,
+        }));
+    }
+    app.session.meta_set("displays", serde_json::Value::Array(displays));
+}
+
+/// Active power plan name, e.g. "Balanced" (from powercfg's output).
+fn power_plan(app: &App) {
+    let Ok(text) = std::fs::read_to_string(app.session.dir.join("sysinfo/powercfg_active.txt")) else { return };
+    if let Some(name) = text.rsplit_once('(').and_then(|(_, r)| r.split_once(')')).map(|(n, _)| n.trim().to_string()) {
+        app.session.meta_set("power_plan", name.into());
+    }
 }
 
 /// Pulls a few key lines out of `netsh wlan show interfaces` into meta.json.

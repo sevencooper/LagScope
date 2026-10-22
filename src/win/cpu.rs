@@ -102,22 +102,16 @@ fn sample_loop(app: Arc<App>) {
     let pages_in = q.add("\\Memory\\Pages Input/sec");
     let disk_idle = q.add("\\PhysicalDisk(_Total)\\% Idle Time");
     let disk_lat = q.add("\\PhysicalDisk(_Total)\\Avg. Disk sec/Transfer");
-    let stem = app.cfg.processes.first().map(|p| p.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()).unwrap_or_default();
-    let pp = |c: &str| format!("\\Process({stem})\\{c}");
-    let g_cpu = q.add(&pp("% Processor Time"));
-    let g_ws = q.add(&pp("Working Set - Private"));
-    let g_pf = q.add(&pp("Page Faults/sec"));
-    let g_io = q.add(&pp("IO Data Bytes/sec"));
-    let g_thr = q.add(&pp("Thread Count"));
-    let g_prio = q.add(&pp("Priority Base"));
+    // How much the CPU is held back by power / thermal limits (0 = not at all).
+    let perf_limit = q.add(&pi("% Performance Limit"));
+    let commit = q.add("\\Memory\\% Committed Bytes In Use");
 
     let gq = Query::new();
     let gpu_eng = gq.as_ref().and_then(|g| g.add("\\GPU Engine(*)\\Utilization Percentage"));
 
-    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
     let sink = app.session.sink(
         "cpu",
-        "t_us,total_pct,utility_pct,max_core_pct,dpc_pct,interrupt_pct,perf_pct,freq_mhz,dpc_rate,interrupt_rate,ctx_switch_rate,run_queue,avail_mb,pages_in_rate,disk_idle_pct,disk_ms_per_io,game_cpu_pct,game_private_mb,game_page_fault_rate,game_io_bps,game_threads,game_priority",
+        "t_us,total_pct,utility_pct,max_core_pct,dpc_pct,interrupt_pct,perf_pct,freq_mhz,dpc_rate,interrupt_rate,ctx_switch_rate,run_queue,avail_mb,pages_in_rate,disk_idle_pct,disk_ms_per_io,game_cpu_pct,game_private_mb,game_page_fault_rate,game_io_bps,game_threads,game_priority,perf_limit_pct,commit_pct",
     );
     let core_sink = app.session.sink("cpu_cores", "t_us,core,pct");
     let gpu_sink = app.session.sink("gpu_engines", "t_us,scope,engine,util_pct");
@@ -140,10 +134,14 @@ fn sample_loop(app: Arc<App>) {
             for (n, v) in &per_core {
                 row!(core_sink, "{t},{n},{v:.1}");
             }
-            let game_cpu = value(g_cpu).map(|v| v / ncpu);
+            // Game figures come from the process watcher (no per-process counters here:
+            // PDH's Process object walks every process and was the costliest part).
+            let gs = *a.game_stats.lock().unwrap();
+            let game_cpu = gs.map(|g| g.cpu_pct);
+            let avail_mb = value(avail);
             row!(
                 sink,
-                "{t},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{t},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 f(value(total), 1),
                 f(value(util), 1),
                 f(max_core, 1),
@@ -155,24 +153,27 @@ fn sample_loop(app: Arc<App>) {
                 f(value(intr_rate), 0),
                 f(value(ctxsw), 0),
                 f(value(queue), 0),
-                f(value(avail), 0),
+                f(avail_mb, 0),
                 f(value(pages_in), 1),
                 f(value(disk_idle), 1),
                 f(value(disk_lat).map(|s| s * 1000.0), 2),
                 f(game_cpu, 1),
-                f(value(g_ws).map(|b| b / 1048576.0), 0),
-                f(value(g_pf), 0),
-                f(value(g_io), 0),
-                f(value(g_thr), 0),
-                f(value(g_prio), 0),
+                f(gs.map(|g| g.private_mb), 0),
+                f(gs.map(|g| g.page_faults_per_s), 0),
+                f(gs.map(|g| g.io_bytes_per_s), 0),
+                f(gs.map(|g| g.threads as f64), 0),
+                f(gs.map(|g| g.priority as f64), 0),
+                f(value(perf_limit), 1),
+                f(value(commit), 1),
             );
             a.live.lock().unwrap().cpu = Some(format!(
-                "CPU {}%  max-core {}%  DPC {}%  {} MHz{}",
+                "CPU {}% (busiest core {}%), drivers {}%, {} MHz{}{}",
                 f(value(total), 0),
                 f(max_core, 0),
                 f(value(dpc), 1),
                 f(value(freq), 0),
-                game_cpu.map(|g| format!("  game {g:.0}%")).unwrap_or_default()
+                game_cpu.map(|g| format!(", game {g:.0}%")).unwrap_or_default(),
+                avail_mb.map(|m| format!(", RAM free {:.1} GB", m / 1024.0)).unwrap_or_default()
             ));
 
             if tick % 4 == 0 {

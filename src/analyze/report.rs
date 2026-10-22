@@ -225,6 +225,7 @@ pub fn render(d: &Data, a: &Analysis) -> String {
         "meta": d.meta,
         "duration_s": d.duration_us as f64 / 1e6,
         "headline": a.headline,
+        "health": a.health,
         "findings": a.findings,
         "recommendations": a.recommendations,
         "stream": a.stream,

@@ -25,6 +25,8 @@ pub struct Config {
     pub extra_targets: Vec<String>,
     /// Wi-Fi check mode: seconds per test window (None = normal recording).
     pub wifi_check: Option<u64>,
+    /// Kernel tracing of driver DPC/ISR times and disk I/O.
+    pub kernel_trace: bool,
     /// Wi-Fi check without questions: run all tests, no driver updates, keep nothing.
     pub unattended: bool,
     /// Wi-Fi check: run the tests even if the baseline shows no freezes.
@@ -48,6 +50,7 @@ impl Default for Config {
             wifi_check: None,
             unattended: false,
             force_tests: false,
+            kernel_trace: true,
         }
     }
 }
@@ -83,6 +86,10 @@ pub struct LiveData {
     pub drivers_worst_ms: f64,
     pub cpu: Option<String>,
     pub gpu: Option<String>,
+    /// Disk activity in the last second.
+    pub disk: Option<String>,
+    /// Busiest other program in the last second (if it used a lot of CPU).
+    pub top_cpu: Option<String>,
     pub top_talker: Option<String>,
     pub marks: u32,
     pub collectors: BTreeMap<String, String>,
@@ -106,6 +113,19 @@ pub struct App {
     /// executable name chosen as the game.
     pub auto_presents: Mutex<HashMap<u32, u32>>,
     pub auto_game: Mutex<Option<String>>,
+    /// Latest game process figures (from the process watcher, once a second).
+    pub game_stats: Mutex<Option<GameStats>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GameStats {
+    /// Percent of all logical CPUs.
+    pub cpu_pct: f64,
+    pub private_mb: f64,
+    pub page_faults_per_s: f64,
+    pub io_bytes_per_s: f64,
+    pub threads: u32,
+    pub priority: i32,
 }
 
 impl App {
@@ -123,6 +143,7 @@ impl App {
             check_status: Mutex::new(None),
             auto_presents: Mutex::new(HashMap::new()),
             auto_game: Mutex::new(None),
+            game_stats: Mutex::new(None),
         }
     }
 

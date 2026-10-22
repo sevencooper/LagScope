@@ -80,7 +80,7 @@ pub fn start(cfg: Config, hooks: Option<Hooks>, console_input: bool) -> Result<C
         serde_json::json!({
             "processes": cfg.processes, "hotkey": cfg.hotkey, "probe_hz": cfg.probe_hz,
             "probes": cfg.probes, "extra_targets": cfg.extra_targets, "duration_s": cfg.duration_s,
-            "wifi_check": cfg.wifi_check,
+            "wifi_check": cfg.wifi_check, "kernel_trace": cfg.kernel_trace,
         }),
     );
     session.meta_set("profile", serde_json::to_value(&cfg.profile).unwrap_or_default());
@@ -113,7 +113,11 @@ pub fn start(cfg: Config, hooks: Option<Hooks>, console_input: bool) -> Result<C
     add("wlan_etw", super::wlan_etw::start(app.clone()));
     add("wifi_driver", super::wlan_etw::start_ndis(app.clone()));
     add("stall", Ok(stall::start(app.clone())));
-    add("drivers", super::drivers::start(app.clone()));
+    if app.cfg.kernel_trace {
+        add("drivers", super::drivers::start(app.clone()));
+    } else {
+        app.session.event("collector", "drivers: driver & disk tracing turned off");
+    }
     add("cpu", cpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     add("gpu", gpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     let marker = hotkey::Marker::new(app.clone());

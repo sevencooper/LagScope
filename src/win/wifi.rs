@@ -355,7 +355,7 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                 assoc.wlanSignalQuality
             );
             a.live.lock().unwrap().wifi = Some(format!(
-                "RSSI {} dBm  q{}  ch{}  rx/tx {rx}/{tx} Mbit/s",
+                "signal {} dBm ({}%), channel {}, link {rx}/{tx} Mbit/s",
                 rssi.map(|r| r.to_string()).unwrap_or("?".into()),
                 assoc.wlanSignalQuality,
                 ch.map(|c| c.to_string()).unwrap_or("?".into()),

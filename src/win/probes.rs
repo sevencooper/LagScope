@@ -309,7 +309,9 @@ fn probe_loop(app: Arc<App>, target: Arc<Target>, sink: Arc<Sink>) {
         }
 
         let busy: Vec<usize> = (0..SLOTS).filter(|&i| slots[i].busy).collect();
-        let wait_ms = ((next_send - clock::raw_now()).max(0) * 1000 / clock.freq()).clamp(0, 100) as u32;
+        // Round up and never wait 0 ms: rounding down made the thread spin through the last
+        // fraction of a millisecond before every send (costly when the system timer is fine).
+        let wait_ms = (((next_send - clock::raw_now()).max(0) * 1000 + clock.freq() - 1) / clock.freq()).clamp(1, 100) as u32;
         if busy.is_empty() {
             std::thread::sleep(std::time::Duration::from_millis(wait_ms as u64));
             continue;

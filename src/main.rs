@@ -46,6 +46,7 @@ OPTIONS:
     --hotkey <KEY>         lag-spike mark key, e.g. F8, F9, Pause, Ctrl+Shift+M (default F8)
     --probe-hz <N>         ICMP probes per second per target (default 20)
     --no-probes            disable ICMP probing
+    --no-kernel-trace      no driver (DPC/ISR) and disk tracing
     --target <IPv4[@TTL]>  extra address to ping continuously (repeatable); @TTL pings
                            the router at that hop count on the path to the address
     --duration <SECS>      stop automatically after SECS seconds
@@ -68,6 +69,9 @@ fn parse_config(args: &[String]) -> Result<Config> {
     let (profiles, _) = profile::load_all(&profile::user_dirs());
     if let Some(p) = profile::last_game().and_then(|g| profile::find(&profiles, &g).cloned()) {
         set_profile(&mut cfg, &p);
+    }
+    if profile::setting("kernel_trace").and_then(|v| v.as_bool()) == Some(false) {
+        cfg.kernel_trace = false;
     }
     let mut custom_process = false;
     let mut it = args.iter();
@@ -99,6 +103,7 @@ fn parse_config(args: &[String]) -> Result<Config> {
             "--hotkey" => cfg.hotkey = val("--hotkey")?,
             "--probe-hz" => cfg.probe_hz = val("--probe-hz")?.parse()?,
             "--no-probes" => cfg.probes = false,
+            "--no-kernel-trace" => cfg.kernel_trace = false,
             "--target" => cfg.extra_targets.push(val("--target")?),
             "--duration" => cfg.duration_s = Some(val("--duration")?.parse()?),
             "--out" => cfg.out_dir = Some(val("--out")?.into()),

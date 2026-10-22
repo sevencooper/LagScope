@@ -119,6 +119,9 @@ pub struct CpuRow {
     pub pages_in: Option<f64>,
     pub disk_ms: Option<f64>,
     pub avail_mb: Option<f64>,
+    /// How much power / thermal limits hold the CPU back (%, 0 = not at all).
+    pub perf_limit: Option<f64>,
+    pub commit_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -133,6 +136,9 @@ pub struct GpuRow {
     pub pstate: String,
     pub reasons: String,
     pub enc: Option<f64>,
+    /// PCIe link generation and lane count at that moment (sampled about once a second).
+    pub pcie_gen: Option<f64>,
+    pub pcie_width: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +170,8 @@ pub struct Note {
 
 #[derive(Default)]
 pub struct Data {
+    /// The session folder.
+    pub dir: std::path::PathBuf,
     pub meta: serde_json::Value,
     pub duration_us: i64,
     pub packets: Vec<Pkt>,
@@ -197,8 +205,23 @@ pub struct Data {
     pub disk_1s: Vec<DiskSec>,
     /// Single disk I/Os that took >= 50 ms: (start t, ms, KB).
     pub disk_slow: Vec<(i64, f64, f64)>,
+    /// Other programs' CPU use, per second, when >= 10% of one core: (t, name, % of a core).
+    pub proc_cpu: Vec<(i64, String, f64)>,
+    /// Network link samples (first one, then changes and error bursts).
+    pub link: Vec<LinkRow>,
     pub etw_lost: u64,
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // `t` kept for completeness
+pub struct LinkRow {
+    pub t: i64,
+    pub up: bool,
+    pub tx_mbps: f64,
+    /// Receive / send errors and discards since the previous row.
+    pub errors: u64,
+    pub discards: u64,
 }
 
 impl Data {
@@ -218,6 +241,7 @@ impl Data {
 
 pub fn load(dir: &Path) -> Result<Data> {
     let mut d = Data::default();
+    d.dir = dir.to_path_buf();
     if let Ok(text) = std::fs::read_to_string(dir.join("meta.json")) {
         d.meta = serde_json::from_str(&text).unwrap_or_default();
     }
@@ -365,6 +389,9 @@ pub fn load(dir: &Path) -> Result<Data> {
             pages_in: r.f("pages_in_rate"),
             disk_ms: r.f("disk_ms_per_io"),
             avail_mb: r.f("avail_mb"),
+            // Windows reports the speed the CPU is allowed (100 = no limit); keep how far below that is.
+            perf_limit: r.f("perf_limit_pct").map(|v| (100.0 - v).max(0.0)),
+            commit_pct: r.f("commit_pct"),
         });
     })?;
     seen("cpu", present, &mut files);
@@ -384,6 +411,8 @@ pub fn load(dir: &Path) -> Result<Data> {
             pstate: r.s("pstate").to_string(),
             reasons: r.s("reasons").to_string(),
             enc: r.f("enc_pct"),
+            pcie_gen: r.f("pcie_gen"),
+            pcie_width: r.f("pcie_width"),
         });
     })?;
     seen("gpu", present, &mut files);
@@ -453,6 +482,18 @@ pub fn load(dir: &Path) -> Result<Data> {
         }
     })?;
     seen("disk_slow", present, &mut files);
+    let present = each(dir, "proc_cpu", |r| {
+        if let (Some(t), Some(p)) = (r.i("t_us"), r.f("cpu_pct")) {
+            d.proc_cpu.push((t, r.s("name").to_string(), p));
+        }
+    })?;
+    seen("proc_cpu", present, &mut files);
+    let present = each(dir, "link", |r| {
+        let Some(t) = r.i("t_us") else { return };
+        let n = |k: &str| r.i(k).unwrap_or(0).max(0) as u64;
+        d.link.push(LinkRow { t, up: r.i("up") == Some(1), tx_mbps: r.f("tx_mbps").unwrap_or(0.0), errors: n("in_errors") + n("out_errors"), discards: n("in_discards") + n("out_discards") });
+    })?;
+    seen("link", present, &mut files);
     for name in ["etw_health", "etw_health_frames", "etw_health_wlan", "etw_health_ndis", "etw_health_kernel"] {
         let mut lost = 0u64;
         each(dir, name, |r| lost = lost.max(r.i("events_lost").unwrap_or(0) as u64))?;

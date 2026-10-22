@@ -25,7 +25,7 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
     let mut recs: Vec<String> = Vec::new();
     let mut headline = Vec::new();
     if let Some(l) = load {
-        headline.push(format!("bufferbloat grade {} down / {} up, {:.0}/{:.0} Mbit/s", l.grade_down, l.grade_up, l.down_mbps, l.up_mbps));
+        headline.push(format!("busy-connection grade {} down / {} up, {:.0}/{:.0} Mbit/s", l.grade_down, l.grade_up, l.down_mbps, l.up_mbps));
         findings.extend(l.summary.iter().cloned());
         recs.extend(l.recommendations.iter().cloned());
     }

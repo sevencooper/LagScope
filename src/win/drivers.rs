@@ -105,6 +105,8 @@ struct State {
     recent: Vec<(i64, f64, usize)>,
     disk: DiskAgg,
     disk_sec: i64,
+    /// Last flushed disk second: (second, read MB, write MB, slowest ms, game fault MB).
+    disk_last: Option<(i64, f64, f64, f64, f64)>,
 }
 
 impl State {
@@ -178,6 +180,7 @@ pub fn start(app: Arc<App>) -> Result<Running> {
         total: HashMap::new(),
         recent: Vec::new(),
         disk: DiskAgg::default(),
+        disk_last: None,
         disk_sec: 0,
     }));
     let st = state.clone();
@@ -222,7 +225,8 @@ pub fn start(app: Arc<App>) -> Result<Running> {
             let mut s = st.lock().unwrap();
             if sec != s.disk_sec {
                 let prev = s.disk_sec;
-                flush_disk(&mut s.disk, prev, &disk_cb);
+                let last = flush_disk(&mut s.disk, prev, &disk_cb);
+                s.disk_last = last.or(s.disk_last);
                 s.disk_sec = sec;
             }
             if disk {
@@ -297,6 +301,7 @@ pub fn start(app: Arc<App>) -> Result<Running> {
     // Console line (worst run in the last 10 s) and the session summary at the end.
     let a = app.clone();
     let st = state.clone();
+    let disk_on = flags & etw::KERNEL_FLAG_DISK_IO != 0;
     let live = super::spawn("drivers-live", move || {
         while a.sleep_ms(1000) {
             let now = a.session.clock.now_us();
@@ -304,6 +309,7 @@ pub fn start(app: Arc<App>) -> Result<Running> {
             s.recent.retain(|(t, _, _)| now - t < 10_000_000);
             let worst = s.recent.iter().copied().max_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
             let known = s.modules.len();
+            let disk = s.disk_last.filter(|d| now / 1_000_000 - d.0 <= 2);
             let txt = match worst {
                 Some((_, us, d)) => format!("worst {:.2} ms ({})", us / 1000.0, s.names[d]),
                 None if known == 0 => "waiting for driver list".into(),
@@ -313,6 +319,15 @@ pub fn start(app: Arc<App>) -> Result<Running> {
             let mut l = a.live.lock().unwrap();
             l.drivers = Some(txt);
             l.drivers_worst_ms = worst.map(|w| w.1 / 1000.0).unwrap_or(0.0);
+            if disk_on {
+                l.disk = Some(match disk {
+                    Some((_, r, w, ms, gm)) => format!(
+                        "reads {r:.1} MB/s, writes {w:.1} MB/s, slowest {ms:.0} ms{}",
+                        if gm >= 0.1 { format!(", game loading {gm:.1} MB/s") } else { String::new() }
+                    ),
+                    None => "idle".into(),
+                });
+            }
         }
     });
     let a = app.clone();
@@ -343,10 +358,11 @@ pub fn start(app: Arc<App>) -> Result<Running> {
     Ok(r)
 }
 
-fn flush_disk(g: &mut DiskAgg, sec: i64, sink: &Sink) {
+fn flush_disk(g: &mut DiskAgg, sec: i64, sink: &Sink) -> Option<(i64, f64, f64, f64, f64)> {
     if g.reads + g.writes + g.game_faults == 0 {
-        return;
+        return None;
     }
+    let last = (sec, g.read_bytes as f64 / 1_048_576.0, g.write_bytes as f64 / 1_048_576.0, g.max_ms, g.game_fault_bytes as f64 / 1_048_576.0);
     row!(
         sink,
         "{},{},{:.2},{},{:.2},{:.1},{},{:.2}",
@@ -360,6 +376,7 @@ fn flush_disk(g: &mut DiskAgg, sec: i64, sink: &Sink) {
         g.game_fault_bytes as f64 / 1_048_576.0
     );
     *g = DiskAgg::default();
+    Some(last)
 }
 
 /// Writes the finished second: a total row, plus drivers with a run of 100 us or more.

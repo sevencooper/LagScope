@@ -199,9 +199,23 @@ pub struct Analysis {
     pub wifi_check: Option<super::experiments::Outcome>,
     /// Wi-Fi driver commands that repeatedly came right before router-ping freezes.
     pub driver_cmds: Vec<DriverCmdCorr>,
+    /// Other programs' average and peak share of a CPU core while playing.
+    pub background_cpu: Vec<(String, f64, f64)>,
+    /// Programs busy during frame hitches: (name, hitches).
+    pub hitch_procs: Vec<(String, usize)>,
     pub findings: Vec<String>,
     pub recommendations: Vec<String>,
     pub headline: String,
+    /// One line per area (network, frames, CPU, ...) for the scorecard.
+    pub health: Vec<Health>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Health {
+    pub area: String,
+    /// "ok", "warn" or "na" (not measured).
+    pub status: String,
+    pub text: String,
 }
 
 pub fn percentile(sorted: &[f64], p: f64) -> f64 {

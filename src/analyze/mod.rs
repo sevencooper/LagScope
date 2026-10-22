@@ -5,6 +5,8 @@ pub mod compare;
 pub mod detect;
 pub mod experiments;
 pub mod findings;
+pub mod hardware;
+pub mod health;
 pub mod load;
 pub mod report;
 
@@ -237,6 +239,94 @@ mod tests {
     }
 
     #[test]
+    fn pc_side_checks_and_scorecard() {
+        let mut s = Synth::new("pcside");
+        // 150 ms hitches every 15 s while Defender is busy; plenty of RAM; 60 Hz on a 144 Hz monitor.
+        let hitch = |t: i64| t > 5_000_000 && (t - 5_000_000).rem_euclid(15_000_000) < 150_000;
+        s.fill(120, |_| false, |_| 2_000, hitch);
+        s.write();
+        let mut pc = String::from("t_us,name,cpu_pct\n");
+        for sec in 0..120i64 {
+            writeln!(pc, "{},chrome.exe,12", sec * 1_000_000).unwrap();
+            if sec >= 5 && (sec - 5) % 15 == 0 {
+                writeln!(pc, "{},MsMpEng.exe,95", sec * 1_000_000 + 500_000).unwrap();
+            }
+        }
+        std::fs::write(s.dir.join("proc_cpu.csv"), pc).unwrap();
+        let mut cpu = String::from("t_us,total_pct,max_core_pct,avail_mb,perf_limit_pct,commit_pct\n");
+        for q in 0..480i64 {
+            // Throttled (30% below full speed) half the time.
+            writeln!(cpu, "{},20,60,{},{},40", q * 250_000, 9000 - q, if q % 2 == 0 { 70 } else { 100 }).unwrap();
+        }
+        std::fs::write(s.dir.join("cpu.csv"), cpu).unwrap();
+        std::fs::write(s.dir.join("link.csv"), "t_us,up,rx_mbps,tx_mbps,in_errors,in_discards,out_errors,out_discards\n0,1,866,866,0,0,0,0\n60000000,0,0,0,0,0,0,0\n61000000,1,866,866,0,0,0,0\n").unwrap();
+        std::fs::write(
+            s.dir.join("meta.json"),
+            r#"{"route":{"is_wifi":true},"config":{"processes":["Discovery.exe"]},"elevated":true,"ram_mb":16384,
+               "displays":[{"monitor":"","primary":true,"width":2560,"height":1440,"hz":60,"max_hz":144}],
+               "power":{"on_battery":false,"battery_saver":false,"has_battery":true,"battery_pct":90},"power_plan":"Balanced"}"#,
+        )
+        .unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert_eq!(a.hitch_procs.first().map(|x| x.0.as_str()), Some("MsMpEng.exe"), "{:?}", a.hitch_procs);
+        let rec = a.recommendations.join("\n");
+        assert!(rec.contains("Defender"), "{rec}");
+        assert!(rec.contains("144 Hz"), "{rec}");
+        assert!(rec.contains("throttled"), "{rec}");
+        assert!(rec.contains("Wi-Fi connection dropped"), "{rec}");
+        let st = |area: &str| a.health.iter().find(|h| h.area == area).map(|h| h.status.clone()).unwrap_or_default();
+        assert_eq!(st("CPU"), "warn", "{:#?}", a.health);
+        assert_eq!(st("Display & power"), "warn");
+        assert_eq!(st("Wi-Fi"), "warn");
+        assert_eq!(st("Memory"), "ok");
+        assert_eq!(st("Disk"), "na");
+        assert!(a.background_cpu.iter().any(|b| b.0 == "chrome.exe" && (b.1 - 12.0).abs() < 1.5), "{:?}", a.background_cpu);
+    }
+
+    #[test]
+    fn hardware_setup() {
+        let mut s = Synth::new("hw");
+        s.fill(60, |_| false, |_| 2_000, |_| false);
+        s.write();
+        // A desktop with one 6000-rated stick at 4800, the monitor on the integrated graphics,
+        // the card at x8 with a lowered power limit, a full C: and the CPU capped at 80%.
+        let mut gpu = String::from("t_us,gpu,util_pct,power_limit_w,pcie_gen,pcie_width\n");
+        for q in 0..60i64 {
+            writeln!(gpu, "{},0,90,250,4,8", q * 1_000_000).unwrap();
+        }
+        std::fs::write(s.dir.join("gpu.csv"), gpu).unwrap();
+        std::fs::create_dir_all(s.dir.join("sysinfo")).unwrap();
+        std::fs::write(
+            s.dir.join("sysinfo/powercfg_processor.txt"),
+            "  Power Setting GUID: bc5038f7-23e0-4960-96da-33abaf5935ec  (Maximum processor state)\n    GUID Alias: PROCTHROTTLEMAX\n    Minimum Possible Setting: 0x00000000\n    Maximum Possible Setting: 0x00000064\n    Possible Settings increment: 0x00000001\n    Possible Settings units: %\n  Current AC Power Setting Index: 0x00000050\n  Current DC Power Setting Index: 0x00000064\n",
+        )
+        .unwrap();
+        std::fs::write(
+            s.dir.join("meta.json"),
+            r#"{"route":{"is_wifi":false},"config":{"processes":["Discovery.exe"]},"elevated":true,"start_local":"2026-10-22 18:00:00",
+               "power":{"has_battery":false,"on_battery":false},
+               "displays":[{"monitor":"","primary":true,"width":2560,"height":1440,"hz":144,"max_hz":144,"adapter":"AMD Radeon(TM) Graphics"}],
+               "nvidia":{"devices":[{"name":"NVIDIA GeForce RTX 4080","max_pcie_gen":4,"max_pcie_width":16,"default_power_limit_w":320}]},
+               "hardware":{"pc_type":1,"bios_date":"2025-06-01",
+                 "memory":[{"gb":32,"speed":4800,"configured":4800,"type":34,"part":"F5-6000J3636F32G","slot":"DIMM_A2"}],
+                 "gpus":[{"name":"AMD Radeon(TM) Graphics","driver_date":"2026-01-01"},{"name":"NVIDIA GeForce RTX 4080","driver_date":"2024-05-01"}],
+                 "disks":[{"name":"x","media":"SSD","letters":["C"]},{"name":"y","media":"HDD","letters":["D"]}],
+                 "system_drive":{"letter":"C","free_gb":6,"size_gb":930},"background_recording":1}}"#,
+        )
+        .unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        let rec = a.recommendations.join("\n");
+        for k in ["XMP", "single-channel", "plugged into the motherboard", "8 PCIe lanes", "power limit", "only 6 GB free", "Maximum processor state", "over a year old", "Game Bar"] {
+            assert!(rec.contains(k), "{k}: {rec}");
+        }
+        assert!(a.findings.iter().any(|f| f.contains("hard disk is installed (D:)")), "{:#?}", a.findings);
+        let hw = a.health.iter().find(|h| h.area == "Hardware setup").unwrap();
+        assert_eq!(hw.status, "warn");
+        assert!(hw.text.contains("RAM at 4800 of 6000 MT/s"), "{}", hw.text);
+        assert_eq!(a.health.iter().find(|h| h.area == "Display & power").unwrap().status, "warn");
+    }
+
+    #[test]
     fn compare_before_after() {
         let mut bad = Synth::new("cmp_a");
         let hole = |t: i64| t > 20_000_000 && (t - 30_000_000).rem_euclid(10_000_000) < 150_000;
@@ -247,7 +337,7 @@ mod tests {
         good.write();
         let c = super::compare::compare(&bad.dir, &good.dir).unwrap();
         let row = |l: &str| c.rows.iter().find(|r| r.label == l).unwrap();
-        assert_eq!(row("Game stalls >=100 ms per min").change, 1, "{:?}", row("Game stalls >=100 ms per min"));
+        assert_eq!(row("Game stalls (100 ms+) per min").change, 1, "{:?}", row("Game stalls (100 ms+) per min"));
         assert_eq!(row("Router freeze pattern").change, 1, "{:?}", row("Router freeze pattern"));
         assert!(c.summary.starts_with("The second session is better"), "{}", c.summary);
     }
