@@ -1,6 +1,7 @@
 //! Offline analysis of a recorded session (platform independent, so recordings from
 //! a friend's PC can be re-analysed anywhere with `lagscope analyze <dir>`).
 
+pub mod compare;
 pub mod detect;
 pub mod experiments;
 pub mod findings;
@@ -214,6 +215,41 @@ mod tests {
         assert!(a.findings.iter().any(|f| f.contains("line up with network stalls")), "{:#?}", a.findings);
         assert!(a.recommendations.iter().any(|r| r.contains("wifidrv.sys")));
         super::run(&s.dir).unwrap();
+    }
+
+    #[test]
+    fn frame_hitches_from_disk_streaming() {
+        let mut s = Synth::new("disk");
+        // 150 ms frame hitches every 15 s, each in a second where the game page-faults 30 MB.
+        let hitch = |t: i64| t > 5_000_000 && (t - 5_000_000).rem_euclid(15_000_000) < 150_000;
+        s.fill(120, |_| false, |_| 2_000, hitch);
+        s.write();
+        let mut disk = String::from("t_us,reads,read_mb,writes,write_mb,max_io_ms,game_hard_faults,game_fault_mb\n");
+        for sec in 0..120i64 {
+            let busy = sec >= 5 && (sec - 5) % 15 == 0;
+            writeln!(disk, "{},{},{},5,1.0,{},{},{}", sec * 1_000_000, if busy { 900 } else { 20 }, if busy { 60.0 } else { 1.0 }, if busy { 40 } else { 2 }, if busy { 3000 } else { 0 }, if busy { 30.0 } else { 0.0 }).unwrap();
+        }
+        std::fs::write(s.dir.join("disk_1s.csv"), disk).unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert!(a.hitch_correlation["game reading from disk"] > 0.8, "{:?}", a.hitch_correlation);
+        assert!(a.recommendations.iter().any(|r| r.contains("SSD")), "{:#?}", a.recommendations);
+        super::run(&s.dir).unwrap();
+    }
+
+    #[test]
+    fn compare_before_after() {
+        let mut bad = Synth::new("cmp_a");
+        let hole = |t: i64| t > 20_000_000 && (t - 30_000_000).rem_euclid(10_000_000) < 150_000;
+        bad.fill(120, hole, |t| if hole(t) { 150_000 } else { 2_000 }, |_| false);
+        bad.write();
+        let mut good = Synth::new("cmp_b");
+        good.fill(120, |_| false, |_| 2_000, |_| false);
+        good.write();
+        let c = super::compare::compare(&bad.dir, &good.dir).unwrap();
+        let row = |l: &str| c.rows.iter().find(|r| r.label == l).unwrap();
+        assert_eq!(row("Game stalls >=100 ms per min").change, 1, "{:?}", row("Game stalls >=100 ms per min"));
+        assert_eq!(row("Router freeze pattern").change, 1, "{:?}", row("Router freeze pattern"));
+        assert!(c.summary.starts_with("The second session is better"), "{}", c.summary);
     }
 
     #[test]

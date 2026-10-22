@@ -390,6 +390,8 @@ pub fn stop_by_name(name: &str) {
 pub const KERNEL_FLAG_IMAGE_LOAD: u32 = EVENT_TRACE_FLAG_IMAGE_LOAD;
 pub const KERNEL_FLAG_DPC: u32 = EVENT_TRACE_FLAG_DPC;
 pub const KERNEL_FLAG_INTERRUPT: u32 = EVENT_TRACE_FLAG_INTERRUPT;
+pub const KERNEL_FLAG_DISK_IO: u32 = EVENT_TRACE_FLAG_DISK_IO;
+pub const KERNEL_FLAG_HARD_FAULTS: u32 = EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS;
 
 impl RealtimeSession {
     /// A private kernel session (system logger mode, Windows 8+) delivering the kernel

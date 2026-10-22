@@ -109,6 +109,39 @@ fn icmp() -> Option<Icmp> {
     if h.is_null() || h as isize == -1 { None } else { Some(Icmp(h)) }
 }
 
+/// Simple blocking pinger (for one-off tests; the session prober is asynchronous).
+pub struct Pinger(Icmp);
+
+impl Pinger {
+    pub fn new() -> Option<Self> {
+        icmp().map(Pinger)
+    }
+
+    /// Round trip in ms, or None if lost / timed out.
+    pub fn ping(&self, ip: Ipv4Addr, timeout_ms: u32) -> Option<f64> {
+        let data = [0x4cu8; 32];
+        let mut buf = vec![0u64; REPLY_BUF / 8];
+        let t = std::time::Instant::now();
+        let n = unsafe {
+            IcmpSendEcho2(
+                self.0.0,
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null(),
+                u32::from_ne_bytes(ip.octets()),
+                data.as_ptr() as *const _,
+                data.len() as u16,
+                std::ptr::null(),
+                buf.as_mut_ptr() as *mut _,
+                REPLY_BUF as u32,
+                timeout_ms,
+            )
+        };
+        let rep = unsafe { &*(buf.as_ptr() as *const ICMP_ECHO_REPLY) };
+        (n > 0 && rep.Status == 0).then(|| t.elapsed().as_secs_f64() * 1000.0)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Hop {
     pub ttl: u8,

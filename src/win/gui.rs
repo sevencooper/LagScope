@@ -23,7 +23,48 @@ const HISTORY: usize = 120;
 enum Tab {
     Record,
     WifiCheck,
+    Network,
     Sessions,
+}
+
+/// A background job of the Network tab.
+struct Job<T> {
+    running: bool,
+    status: String,
+    result: Option<Result<T, String>>,
+}
+
+impl<T> Default for Job<T> {
+    fn default() -> Self {
+        Job { running: false, status: String::new(), result: None }
+    }
+}
+
+type JobRef<T> = Arc<Mutex<Job<T>>>;
+
+/// Runs `f` on a thread, publishing its status and result into `job`.
+fn spawn_job<T: Send + 'static>(job: &JobRef<T>, ctx: &egui::Context, f: impl FnOnce(&dyn Fn(String)) -> Result<T> + Send + 'static) {
+    {
+        let mut j = job.lock().unwrap();
+        j.running = true;
+        j.status = "starting ...".into();
+        j.result = None;
+    }
+    let (j, c) = (job.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let j2 = j.clone();
+        let c2 = c.clone();
+        let status = move |s: String| {
+            j2.lock().unwrap().status = s;
+            c2.request_repaint();
+        };
+        let r = f(&status).map_err(|e| format!("{e:#}"));
+        let mut g = j.lock().unwrap();
+        g.running = false;
+        g.result = Some(r);
+        drop(g);
+        c.request_repaint();
+    });
 }
 
 enum Task {
@@ -49,6 +90,8 @@ struct Shared {
     stop: bool,
     /// Which tab started the task (results are shown there).
     task_tab: Tab,
+    /// The running/last recording was started by auto-record (for the game: profile).
+    auto_game: Option<Profile>,
 }
 
 /// Scripted run for automated testing: actions at fixed times, screenshots, metrics.
@@ -66,6 +109,16 @@ struct SelfTest {
 
 struct GuiApp {
     shared: Arc<Mutex<Shared>>,
+    /// Auto-record on/off (read by the watcher thread), the tray icon and its events.
+    auto_on: Arc<std::sync::atomic::AtomicBool>,
+    cfg_shared: Arc<Mutex<Config>>,
+    tray: Arc<Mutex<Option<super::tray::Tray>>>,
+    tray_rx: mpsc::Receiver<super::tray::TrayEvent>,
+    tray_tx: mpsc::Sender<super::tray::TrayEvent>,
+    startup_task: bool,
+    hidden: bool,
+    exiting: bool,
+    told_about_tray: bool,
     log: Arc<Mutex<VecDeque<String>>>,
     cfg: Config,
     profiles: Vec<Profile>,
@@ -86,6 +139,14 @@ struct GuiApp {
     summary: Option<(PathBuf, Vec<String>, Vec<String>)>,
     /// Re-analysis running in the background (sessions list reloads when it finishes).
     reanalyzing: Arc<std::sync::atomic::AtomicUsize>,
+    net_router: JobRef<super::router::RouterInfo>,
+    net_load: JobRef<super::loadtest::LoadResult>,
+    net_scan: JobRef<super::wifiscan::ScanResult>,
+    /// Report folder of the last saved network test.
+    net_saved: Arc<Mutex<Option<PathBuf>>>,
+    /// Sessions ticked for comparison (oldest first) and the comparison being shown.
+    compare_pick: Vec<PathBuf>,
+    comparison: Option<Result<crate::analyze::compare::Comparison, String>>,
 }
 
 struct SessionRow {
@@ -116,14 +177,15 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
+pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>, start_hidden: bool) -> Result<()> {
     let log = Arc::new(Mutex::new(VecDeque::new()));
-    let shared = Arc::new(Mutex::new(Shared { question: None, task: Task::Idle, stop: false, task_tab: Tab::Record }));
+    let shared = Arc::new(Mutex::new(Shared { question: None, task: Task::Idle, stop: false, task_tab: Tab::Record, auto_game: None }));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("LagScope {}", env!("CARGO_PKG_VERSION")))
             .with_inner_size([980.0, 720.0])
-            .with_min_inner_size([720.0, 520.0]),
+            .with_min_inner_size([720.0, 520.0])
+            .with_visible(!start_hidden),
         centered: true,
         ..Default::default()
     };
@@ -166,12 +228,30 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
                     Err(e) => format!("Could not restore '{what}': {e:#}"),
                 });
             }
+            let auto_on = Arc::new(std::sync::atomic::AtomicBool::new(start_hidden || profile::setting("auto_record").and_then(|v| v.as_bool()).unwrap_or(false)));
+            let cfg_shared = Arc::new(Mutex::new(cfg.clone()));
+            let tray = Arc::new(Mutex::new(None));
+            let (tray_tx, tray_rx) = mpsc::channel();
+            {
+                let (s, c, on, cf, t) = (sh.clone(), ctx.clone(), auto_on.clone(), cfg_shared.clone(), tray.clone());
+                let profs = profiles.clone();
+                std::thread::Builder::new().name("auto-record".into()).spawn(move || auto_record_loop(s, c, on, cf, profs, t)).ok();
+            }
             let selftest = selftest.map(|(scenario, out)| {
                 let _ = std::fs::create_dir_all(&out);
                 SelfTest { scenario, out, t0: Instant::now(), step: 0, shots: Vec::new(), cpu0: 0.0, idle_cpu: None, wait_until: 0.0, q_seen: None }
             });
-            Ok(Box::new(GuiApp {
+            let mut app = GuiApp {
                 shared: sh,
+                auto_on,
+                cfg_shared,
+                tray,
+                tray_rx,
+                tray_tx,
+                startup_task: startup_task_exists(),
+                hidden: start_hidden,
+                exiting: false,
+                told_about_tray: start_hidden,
                 log,
                 cfg,
                 profiles,
@@ -189,10 +269,130 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
                 selftest,
                 summary: None,
                 reanalyzing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            }))
+                net_router: Arc::default(),
+                net_load: Arc::default(),
+                net_scan: Arc::default(),
+                net_saved: Arc::default(),
+                compare_pick: Vec::new(),
+                comparison: None,
+            };
+            if app.auto_on.load(std::sync::atomic::Ordering::Relaxed) {
+                app.ensure_tray(&ctx);
+            }
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
+}
+
+/// Starts a recording on a worker thread (Start button or auto-record).
+fn start_recording(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, mut cfg: Config, auto: Option<Profile>) {
+    cfg.wifi_check = None;
+    cfg.open_report = false;
+    if let Some(p) = &auto {
+        cfg.profile = p.clone();
+        cfg.processes = p.processes.clone();
+    }
+    let sh = shared.clone();
+    let c = ctx.clone();
+    {
+        let mut s = sh.lock().unwrap();
+        s.stop = false;
+        s.task = Task::Preparing("Starting the recording ...");
+        s.task_tab = Tab::Record;
+        s.auto_game = auto;
+    }
+    std::thread::spawn(move || match capture::start(cfg, None, false) {
+        Ok(cap) => drive(&sh, &c, cap),
+        Err(e) => {
+            sh.lock().unwrap().task = Task::Failed(format!("{e:#}"));
+            c.request_repaint();
+        }
+    });
+}
+
+/// Auto-record: every 2 s, start recording when a game with a profile is running, and stop
+/// ~20 s after it exits. Runs on its own thread; costs one process snapshot per tick.
+fn auto_record_loop(shared: Arc<Mutex<Shared>>, ctx: egui::Context, enabled: Arc<std::sync::atomic::AtomicBool>, cfg: Arc<Mutex<Config>>, profiles: Vec<Profile>, tray: Arc<Mutex<Option<super::tray::Tray>>>) {
+    use std::sync::atomic::Ordering;
+    let mut gone_since: Option<Instant> = None;
+    let mut announced_done = true;
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let on = enabled.load(Ordering::Relaxed);
+        let (busy, auto, done_headline) = {
+            let s = shared.lock().unwrap();
+            let done = match &s.task {
+                Task::Done(f) => Some(if f.discarded { "Stopped quickly - nothing saved.".to_string() } else { f.headline.clone() }),
+                _ => None,
+            };
+            (s.task.busy(), s.auto_game.clone(), done)
+        };
+        // Tell the user when an automatic recording has its report.
+        if let (Some(p), Some(h)) = (&auto, &done_headline) {
+            if !announced_done {
+                announced_done = true;
+                if let Some(t) = tray.lock().unwrap().as_ref() {
+                    t.notify(&format!("{} - report ready", p.name), h);
+                }
+            }
+        }
+        let names: Vec<String> = if on || auto.is_some() { super::procwatch::snapshot().into_values().map(|n| n.to_ascii_lowercase()).collect() } else { Vec::new() };
+        let running = |p: &Profile| p.processes.iter().any(|x| names.contains(&x.to_ascii_lowercase()));
+        let tip = match (&auto, busy, on) {
+            (Some(p), true, _) => format!("LagScope - recording {}", p.name),
+            (_, true, _) => "LagScope - recording".to_string(),
+            (_, false, true) => "LagScope - auto-record on (waiting for a game)".to_string(),
+            _ => "LagScope".to_string(),
+        };
+        if let Some(t) = tray.lock().unwrap().as_ref() {
+            t.set_state(&tip, on);
+        }
+        if busy {
+            // Stop an automatic recording once its game has been gone for 20 s.
+            if let Some(p) = &auto {
+                if running(p) {
+                    gone_since = None;
+                } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(20) {
+                    shared.lock().unwrap().stop = true;
+                    gone_since = None;
+                    ctx.request_repaint();
+                }
+            }
+            continue;
+        }
+        if !on {
+            continue;
+        }
+        if let Some(p) = profiles.iter().find(|p| !p.is_auto() && running(p)) {
+            crate::ui::log(format!("Auto-record: {} started, recording.", p.name));
+            if let Some(t) = tray.lock().unwrap().as_ref() {
+                t.notify("LagScope is recording", &format!("{} is running. Press {} at every lag spike.", p.name, cfg.lock().unwrap().hotkey));
+            }
+            announced_done = false;
+            start_recording(&shared, &ctx, cfg.lock().unwrap().clone(), Some(p.clone()));
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// "Start with Windows": a scheduled task at logon with highest privileges (the only way to
+/// start an administrator tool at logon without a UAC prompt).
+const TASK: &str = "LagScope auto-record";
+
+pub fn startup_task_exists() -> bool {
+    super::sysinfo::run_env("schtasks.exe", &["/Query", "/TN", TASK], None, Duration::from_secs(10), &[]).contains(TASK)
+}
+
+pub fn set_startup_task(on: bool) -> Result<(), String> {
+    let out = if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let tr = format!("\"{}\" --tray", exe.display());
+        super::sysinfo::run_env("schtasks.exe", &["/Create", "/TN", TASK, "/TR", &tr, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"], None, Duration::from_secs(15), &[])
+    } else {
+        super::sysinfo::run_env("schtasks.exe", &["/Delete", "/TN", TASK, "/F"], None, Duration::from_secs(15), &[])
+    };
+    if startup_task_exists() == on { Ok(()) } else { Err(out.trim().to_string()) }
 }
 
 /// Polls the running capture until it stops, then builds the report.
@@ -220,25 +420,8 @@ fn drive(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, cap: capture::Capture
 
 impl GuiApp {
     fn start_record(&mut self, ctx: &egui::Context) {
-        let mut cfg = self.cfg.clone();
-        cfg.wifi_check = None;
-        cfg.open_report = false;
         self.reset_history();
-        let sh = self.shared.clone();
-        let c = ctx.clone();
-        {
-            let mut s = sh.lock().unwrap();
-            s.stop = false;
-            s.task = Task::Preparing("Starting the recording ...");
-            s.task_tab = Tab::Record;
-        }
-        std::thread::spawn(move || match capture::start(cfg, None, false) {
-            Ok(cap) => drive(&sh, &c, cap),
-            Err(e) => {
-                sh.lock().unwrap().task = Task::Failed(format!("{e:#}"));
-                c.request_repaint();
-            }
-        });
+        start_recording(&self.shared, ctx, self.cfg.clone(), None);
     }
 
     fn start_check(&mut self, ctx: &egui::Context, unattended: bool, force: bool, secs: u64) {
@@ -268,6 +451,86 @@ impl GuiApp {
             }
             c.request_repaint();
         });
+    }
+
+    /// Creates the tray icon (once).
+    fn ensure_tray(&mut self, ctx: &egui::Context) {
+        let mut t = self.tray.lock().unwrap();
+        if t.is_some() {
+            return;
+        }
+        let (tx, c) = (self.tray_tx.clone(), ctx.clone());
+        *t = super::tray::Tray::start("LagScope", self.auto_on.load(std::sync::atomic::Ordering::Relaxed), move |ev| {
+            let _ = tx.send(ev);
+            c.request_repaint();
+        });
+    }
+
+    fn set_auto(&mut self, ctx: &egui::Context, on: bool) {
+        self.auto_on.store(on, std::sync::atomic::Ordering::Relaxed);
+        profile::set_setting("auto_record", on.into());
+        if on {
+            self.ensure_tray(ctx);
+        }
+        crate::ui::log(format!("Auto-record {}", if on { "on" } else { "off" }));
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Tray events, window closing and the "close after finishing" step. Runs every frame and
+    /// also while the window is hidden (eframe calls `logic` then).
+    fn housekeeping(&mut self, ctx: &egui::Context) {
+        use super::tray::TrayEvent;
+        while let Ok(ev) = self.tray_rx.try_recv() {
+            match ev {
+                TrayEvent::Open => self.show_window(ctx),
+                TrayEvent::ToggleAuto => {
+                    let on = !self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
+                    self.set_auto(ctx, on);
+                }
+                TrayEvent::Exit => {
+                    self.exiting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        let busy = self.shared.lock().unwrap().task.busy();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let tray = self.tray.lock().unwrap().is_some() && self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
+            if tray && !self.exiting {
+                // With auto-record on, closing the window keeps LagScope running in the tray.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hidden = true;
+                if !self.told_about_tray {
+                    self.told_about_tray = true;
+                    if let Some(t) = self.tray.lock().unwrap().as_ref() {
+                        t.notify("LagScope keeps running", "Auto-record is on, so LagScope stays here in the tray. Right-click the icon to exit.");
+                    }
+                }
+            } else if busy {
+                // Closing while something runs: stop it, build the report, then close.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.shared.lock().unwrap().stop = true;
+                self.close_when_done = true;
+            } else if let Some(t) = self.tray.lock().unwrap().as_ref() {
+                t.remove();
+            }
+        }
+        if self.close_when_done && !busy {
+            if let Some(t) = self.tray.lock().unwrap().as_ref() {
+                t.remove();
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if busy && self.close_when_done {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
     }
 
     fn reset_history(&mut self) {
@@ -328,6 +591,8 @@ impl GuiApp {
             let analysis: serde_json::Value = std::fs::read_to_string(dir.join("analysis.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
             let game = if meta["wifi_check_plan"].is_array() {
                 "Wi-Fi check".to_string()
+            } else if meta["kind"] == "network_test" {
+                "Network test".to_string()
             } else {
                 meta["detected_games"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| profile::of_session(&meta).name)
             };
@@ -348,7 +613,7 @@ impl GuiApp {
             ui.heading(RichText::new("LagScope").strong());
             ui.label(RichText::new(env!("CARGO_PKG_VERSION")).weak());
             ui.add_space(16.0);
-            for (t, name) in [(Tab::Record, "Record"), (Tab::WifiCheck, "Wi-Fi check"), (Tab::Sessions, "Sessions")] {
+            for (t, name) in [(Tab::Record, "Record"), (Tab::WifiCheck, "Wi-Fi check"), (Tab::Network, "Network"), (Tab::Sessions, "Sessions")] {
                 if ui.selectable_label(self.tab == t, RichText::new(name).size(15.0)).clicked() {
                     self.tab = t;
                     if t == Tab::Sessions {
@@ -413,6 +678,28 @@ impl GuiApp {
         }
         if mine {
             self.task_result(ui);
+        }
+        ui.add_space(14.0);
+        ui.separator();
+        ui.label(RichText::new("Automatic recording").strong());
+        let mut on = self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
+        let games: Vec<&str> = self.profiles.iter().filter(|p| !p.is_auto()).map(|p| p.name.as_str()).collect();
+        if ui.checkbox(&mut on, format!("Record automatically whenever one of these games runs: {}", games.join(", "))).changed() {
+            self.set_auto(&ctx, on);
+        }
+        ui.label(RichText::new("LagScope then stays in the notification area (tray) when you close this window, records each game session and builds the report when the game exits.").weak());
+        let mut st = self.startup_task;
+        if ui.add_enabled(on || st, egui::Checkbox::new(&mut st, "Start LagScope with Windows (hidden in the tray, auto-record on)")).changed() {
+            match set_startup_task(st) {
+                Ok(()) => {
+                    self.startup_task = st;
+                    crate::ui::log(format!("Start with Windows: {}", if st { "on" } else { "off" }));
+                }
+                Err(e) => {
+                    crate::ui::log(format!("Could not change 'start with Windows': {e}"));
+                    self.show_log = true;
+                }
+            }
         }
     }
 
@@ -618,6 +905,191 @@ impl GuiApp {
         }
     }
 
+    fn start_router_job(&self, ctx: &egui::Context) {
+        spawn_job(&self.net_router, ctx, |status| {
+            status("Looking up the router ...".into());
+            let gw = super::probes::route_to(std::net::Ipv4Addr::new(1, 1, 1, 1)).and_then(|r| r.gateway).ok_or_else(|| anyhow::anyhow!("no internet connection"))?;
+            let hops = super::probes::traceroute(std::net::Ipv4Addr::new(1, 1, 1, 1), 4);
+            let hop2 = hops.iter().filter_map(|h| h.ip).find(|ip| *ip != gw && !ip.is_private());
+            Ok(super::router::identify(gw, hop2))
+        });
+    }
+
+    /// Saves the finished network tests as a session (called when a test completes).
+    fn save_network(&self) {
+        let base = capture::default_out(&self.cfg);
+        let r = self.net_router.lock().unwrap().result.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        let l = self.net_load.lock().unwrap().result.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        let w = self.net_scan.lock().unwrap().result.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        match super::netreport::save(&base, r.as_ref(), l.as_ref(), w.as_ref()) {
+            Ok(d) => {
+                crate::ui::log(format!("Network test saved: {}", d.display()));
+                *self.net_saved.lock().unwrap() = Some(d);
+            }
+            Err(e) => crate::ui::log(format!("Could not save the network test: {e:#}")),
+        }
+    }
+
+    fn network_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let recording = self.shared.lock().unwrap().task.busy();
+        {
+            let started = { let j = self.net_router.lock().unwrap(); j.running || j.result.is_some() };
+            if !started {
+                self.start_router_job(&ctx);
+            }
+        }
+        let any_running = [self.net_router.lock().unwrap().running, self.net_load.lock().unwrap().running, self.net_scan.lock().unwrap().running];
+        if any_running.iter().any(|x| *x) {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+
+        ui.heading("Router");
+        {
+            let j = self.net_router.lock().unwrap();
+            match &j.result {
+                None => {
+                    ui.label(RichText::new(&j.status).italics());
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(Color32::LIGHT_RED, e);
+                }
+                Some(Ok(r)) => {
+                    ui.label(RichText::new(if r.name.is_empty() { "Unknown router".to_string() } else { r.name.clone() }).size(16.0).strong());
+                    ui.label(format!("Address {}{}", r.gateway, if r.isp_host.is_empty() { String::new() } else { format!("   ISP: {} ({})", if r.isp.is_empty() { "?" } else { &r.isp }, r.isp_host) }));
+                    for n in &r.notes {
+                        ui.add(egui::Label::new(format!("• {n}")).wrap());
+                    }
+                }
+            }
+        }
+        ui.add_space(10.0);
+        ui.separator();
+
+        ui.heading("Latency under load (bufferbloat)");
+        ui.add(egui::Label::new("Downloads and uploads as fast as possible for about 12 s each (to Cloudflare's public speed test) while pinging your router and the internet. If latency jumps when the connection is busy, everyone's downloads and uploads will make games lag. Takes about 40 s and can use 1-2 GB of data on a fast line.").wrap());
+        let load_running = self.net_load.lock().unwrap().running;
+        if ui.add_enabled(!load_running && !recording, egui::Button::new("Run latency-under-load test")).on_disabled_hover_text("Not while recording or another test runs").clicked() {
+            spawn_job(&self.net_load, &ctx, |status| super::loadtest::run(status));
+        }
+        let mut save = false;
+        {
+            let j = self.net_load.lock().unwrap();
+            if j.running {
+                ui.label(RichText::new(&j.status).italics());
+            }
+            match &j.result {
+                Some(Ok(l)) => {
+                    let gc = |g: &str| match g {
+                        "A+" | "A" => Color32::from_rgb(110, 210, 120),
+                        "B" => Color32::from_rgb(230, 200, 90),
+                        _ => Color32::from_rgb(240, 110, 100),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Download").strong());
+                        ui.label(RichText::new(&l.grade_down).size(20.0).color(gc(&l.grade_down)).strong());
+                        ui.add_space(14.0);
+                        ui.label(RichText::new("Upload").strong());
+                        ui.label(RichText::new(&l.grade_up).size(20.0).color(gc(&l.grade_up)).strong());
+                    });
+                    for x in l.summary.iter() {
+                        ui.add(egui::Label::new(x).wrap());
+                    }
+                    for x in l.recommendations.iter() {
+                        ui.add(egui::Label::new(format!("• {x}")).wrap());
+                    }
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(Color32::LIGHT_RED, format!("Test failed: {e}"));
+                }
+                None => {}
+            }
+            if !j.running && j.result.as_ref().is_some_and(|r| r.is_ok()) && !self.net_saved_has(&j.status) {
+                save = true;
+            }
+        }
+        ui.add_space(10.0);
+        ui.separator();
+
+        ui.heading("Wi-Fi neighbourhood");
+        ui.add(egui::Label::new("Scans for nearby Wi-Fi networks and shows how crowded each channel is (names of other networks are not stored). The scan takes the Wi-Fi off its channel for a moment, so don't run it during a match.").wrap());
+        let scan_running = self.net_scan.lock().unwrap().running;
+        if ui.add_enabled(!scan_running && !recording, egui::Button::new("Scan Wi-Fi neighbourhood")).clicked() {
+            spawn_job(&self.net_scan, &ctx, |status| {
+                status("Scanning (about 5 s) ...".into());
+                super::wifiscan::scan()
+            });
+        }
+        {
+            let j = self.net_scan.lock().unwrap();
+            if j.running {
+                ui.label(RichText::new(&j.status).italics());
+            }
+            match &j.result {
+                Some(Ok(sc)) => {
+                    for x in &sc.summary {
+                        ui.add(egui::Label::new(x).wrap());
+                    }
+                    for b in sc.bands.iter().filter(|b| !b.channels.is_empty()) {
+                        egui::CollapsingHeader::new(format!("{} - {} networks", b.band, b.networks)).id_salt(&b.band).default_open(b.band == sc.own_band).show(ui, |ui| {
+                            egui::Grid::new(format!("ch{}", b.band)).striped(true).num_columns(4).show(ui, |ui| {
+                                for h in ["channel", "networks", "strongest", "congestion"] {
+                                    ui.label(RichText::new(h).weak());
+                                }
+                                ui.end_row();
+                                for c in &b.channels {
+                                    let mut name = c.channel.to_string();
+                                    if b.band == sc.own_band && c.channel == sc.own_channel {
+                                        name.push_str("  (yours)");
+                                    }
+                                    if b.best.is_some_and(|x| x.0 == c.channel) {
+                                        name.push_str("  (quietest)");
+                                    }
+                                    ui.label(name);
+                                    ui.label(c.networks.to_string());
+                                    ui.label(if c.networks > 0 { format!("{} dBm", c.strongest_dbm) } else { "-".into() });
+                                    ui.label(format!("{:.1}", c.score));
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                    }
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(Color32::LIGHT_RED, e);
+                }
+                None => {}
+            }
+            if !j.running && j.result.as_ref().is_some_and(|r| r.is_ok()) && !self.net_saved_has(&j.status) {
+                save = true;
+            }
+        }
+        // Save once nothing is running any more (one session per batch of tests).
+        let idle = !self.net_load.lock().unwrap().running && !self.net_scan.lock().unwrap().running;
+        if save && idle {
+            // Mark both finished jobs as saved, then write one session with everything.
+            for st in [&mut self.net_load.lock().unwrap().status, &mut self.net_scan.lock().unwrap().status] {
+                if !st.ends_with(" [saved]") {
+                    st.push_str(" [saved]");
+                }
+            }
+            self.save_network();
+        }
+        if let Some(d) = self.net_saved.lock().unwrap().clone() {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Saved as {} (also in Sessions)", d.file_name().unwrap_or_default().to_string_lossy())).weak());
+                if ui.button("Open report").clicked() {
+                    super::open_path(&d.join("report.html"));
+                }
+            });
+        }
+    }
+
+    fn net_saved_has(&self, status: &str) -> bool {
+        status.ends_with(" [saved]")
+    }
+
     fn sessions_tab(&mut self, ui: &mut egui::Ui) {
         if !self.sessions_loaded {
             self.load_sessions();
@@ -642,11 +1114,67 @@ impl GuiApp {
             ui.label("No recordings yet.");
             return;
         }
+        if let Some(c) = &self.comparison {
+            let mut back = false;
+            match c {
+                Ok(c) => {
+                    ui.horizontal(|ui| {
+                        ui.heading("Comparison");
+                        if ui.button("Back to the list").clicked() {
+                            back = true;
+                        }
+                    });
+                    ui.add(egui::Label::new(RichText::new(&c.summary).size(15.0)).wrap());
+                    ui.add_space(6.0);
+                    egui::Grid::new("cmp").num_columns(3).striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
+                        ui.label("");
+                        ui.label(RichText::new(format!("A  {}", c.a_name)).strong());
+                        ui.label(RichText::new(format!("B  {}", c.b_name)).strong());
+                        ui.end_row();
+                        for r in &c.rows {
+                            ui.label(r.label);
+                            ui.add(egui::Label::new(&r.a).wrap());
+                            let color = match r.change {
+                                1 => Color32::from_rgb(110, 210, 120),
+                                -1 => Color32::from_rgb(240, 110, 100),
+                                _ => ui.visuals().text_color(),
+                            };
+                            ui.add(egui::Label::new(RichText::new(&r.b).color(color)).wrap());
+                            ui.end_row();
+                        }
+                    });
+                    ui.label(RichText::new("Green = B is better, red = B is worse.").weak());
+                }
+                Err(e) => {
+                    ui.colored_label(Color32::LIGHT_RED, format!("Could not compare: {e}"));
+                    if ui.button("Back").clicked() {
+                        back = true;
+                    }
+                }
+            }
+            if back {
+                self.comparison = None;
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Tick two sessions to compare them (e.g. before and after a fix).").weak());
+            if self.compare_pick.len() == 2 && ui.button("Compare").clicked() {
+                let mut pick = self.compare_pick.clone();
+                pick.sort();
+                self.comparison = Some(crate::analyze::compare::compare(&pick[0], &pick[1]).map_err(|e| format!("{e:#}")));
+            }
+        });
         let mut redo: Option<PathBuf> = None;
+        let mut toggle: Option<PathBuf> = None;
         for r in &self.sessions {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
+                    let mut on = self.compare_pick.contains(&r.dir);
+                    if ui.checkbox(&mut on, "").on_hover_text("Select for comparison").changed() {
+                        toggle = Some(r.dir.clone());
+                    }
                     ui.label(RichText::new(&r.when).strong());
                     ui.label(RichText::new(&r.game).weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -668,6 +1196,16 @@ impl GuiApp {
                 });
                 ui.add(egui::Label::new(&r.headline).wrap());
             });
+        }
+        if let Some(dir) = toggle {
+            if let Some(i) = self.compare_pick.iter().position(|d| *d == dir) {
+                self.compare_pick.remove(i);
+            } else {
+                self.compare_pick.push(dir);
+                if self.compare_pick.len() > 2 {
+                    self.compare_pick.remove(0);
+                }
+            }
         }
         if let Some(dir) = redo {
             if let Some(r) = self.sessions.iter_mut().find(|r| r.dir == dir) {
@@ -851,6 +1389,72 @@ impl GuiApp {
                 shot(ctx, st, "02_reanalyzed");
                 st.step = 100;
             }
+            ("compare", 1) => {
+                self.tab = Tab::Sessions;
+                self.load_sessions();
+                let mut pick: Vec<PathBuf> = self.sessions.iter().take(2).map(|r| r.dir.clone()).collect();
+                pick.sort();
+                if pick.len() == 2 {
+                    self.comparison = Some(crate::analyze::compare::compare(&pick[0], &pick[1]).map_err(|e| format!("{e:#}")));
+                }
+                st.wait_until = t + 2.0;
+                st.step += 1;
+            }
+            ("compare", 2) if t > st.wait_until => {
+                shot(ctx, st, "02_compare");
+                st.step = 100;
+            }
+            ("network", 1) => {
+                self.tab = Tab::Network;
+                st.step += 1;
+            }
+            ("network", 2) if t > 3.0 => {
+                spawn_job(&self.net_scan, ctx, |_| super::wifiscan::scan());
+                spawn_job(&self.net_load, ctx, |status| super::loadtest::run(status));
+                st.step += 1;
+            }
+            ("network", 3) if t > 8.0 => {
+                shot(ctx, st, "02_network_running");
+                st.step += 1;
+            }
+            ("network", 4) if !self.net_load.lock().unwrap().running && !self.net_scan.lock().unwrap().running && !self.net_router.lock().unwrap().running => {
+                st.wait_until = t + 3.0;
+                st.step += 1;
+            }
+            ("network", 5) if t > st.wait_until => {
+                shot(ctx, st, "03_network_done");
+                st.step = 100;
+            }
+            ("auto", 1) => {
+                self.set_auto(ctx, true);
+                st.step += 1;
+            }
+            ("auto", 2) if self.shared.lock().unwrap().auto_game.is_some() && matches!(self.shared.lock().unwrap().task, Task::Running { .. }) => {
+                st.wait_until = t + 12.0;
+                st.step += 1;
+            }
+            ("auto", 3) if t > st.wait_until => {
+                shot(ctx, st, "02_auto_recording");
+                st.step += 1;
+            }
+            ("auto", 4) if done => {
+                st.wait_until = t + 3.0;
+                st.step += 1;
+            }
+            ("auto", 5) if t > st.wait_until => {
+                shot(ctx, st, "03_auto_done");
+                // Like clicking X with auto-record on: should hide to the tray, not exit.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                st.wait_until = t + 4.0;
+                st.step += 1;
+            }
+            ("auto", 6) if t > st.wait_until => {
+                crate::ui::log(format!("selftest: hidden after close = {}", self.hidden));
+                // Restore the user's setting, then exit through the tray menu path.
+                self.auto_on.store(false, std::sync::atomic::Ordering::Relaxed);
+                profile::set_setting("auto_record", false.into());
+                st.step = 101;
+            }
             ("prompt", 1) => {
                 std::thread::spawn(|| console::ask_yes_no("Check Windows Update for newer Wi-Fi / Bluetooth drivers? (takes a minute or two)", true));
                 st.wait_until = t + 6.0;
@@ -913,7 +1517,11 @@ impl GuiApp {
             }
             (_, 102) => {
                 std::thread::sleep(Duration::from_millis(500));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if self.tray.lock().unwrap().is_some() {
+                    let _ = self.tray_tx.send(super::tray::TrayEvent::Exit);
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 st.step = 103;
             }
             _ => {}
@@ -938,24 +1546,17 @@ impl GuiApp {
 }
 
 impl eframe::App for GuiApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.housekeeping(ctx);
+        self.selftest_step(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.save_screenshots(&ctx);
-        self.selftest_step(&ctx);
 
-        // Closing while something runs: stop it, build the report, then close.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            let busy = self.shared.lock().unwrap().task.busy();
-            if busy {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.shared.lock().unwrap().stop = true;
-                self.close_when_done = true;
-            }
-        }
         let busy = self.shared.lock().unwrap().task.busy();
-        if self.close_when_done && !busy {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        *self.cfg_shared.lock().unwrap() = self.cfg.clone();
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(4.0);
@@ -972,6 +1573,7 @@ impl eframe::App for GuiApp {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.tab {
                 Tab::Record => self.record_tab(ui),
                 Tab::WifiCheck => self.wifi_tab(ui),
+                Tab::Network => self.network_tab(ui),
                 Tab::Sessions => self.sessions_tab(ui),
             });
         });

@@ -8,6 +8,10 @@
 //! (`driver_long.csv`), and as a per-driver histogram for the whole session (meta.json).
 //! Code addresses are mapped to drivers with the image-load events the session emits for
 //! every loaded module at start (plus later loads).
+//!
+//! The same kernel session also records disk I/O (completion time and size) and hard page
+//! faults of the game, aggregated per second into `disk_1s.csv` (slow I/Os individually in
+//! `disk_slow.csv`), so frame hitches can be matched to asset streaming / paging.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,13 @@ use crate::session::Sink;
 
 const PERFINFO: GUID = GUID::from_u128(0xce1dbfb4_137e_4da6_87b0_3f59aa102cbc);
 const IMAGE: GUID = GUID::from_u128(0x2cb15d1d_5fc1_11d2_abe1_00a0c911f518);
+const DISKIO: GUID = GUID::from_u128(0x3d6fa8d4_fe05_11d0_9dda_00c04fd7ba7c);
+const PAGEFAULT: GUID = GUID::from_u128(0x3d6fa8d3_fe05_11d0_9dda_00c04fd7ba7c);
+const OP_DISK_READ: u8 = 10;
+const OP_DISK_WRITE: u8 = 11;
+const OP_HARD_FAULT: u8 = 32;
+/// Disk I/Os taking at least this long are written individually.
+const SLOW_IO_MS: f64 = 50.0;
 const OP_THREAD_DPC: u8 = 66;
 const OP_ISR: u8 = 67;
 const OP_DPC: u8 = 68;
@@ -63,6 +74,17 @@ impl Agg {
     }
 }
 
+#[derive(Default)]
+struct DiskAgg {
+    reads: u32,
+    read_bytes: u64,
+    writes: u32,
+    write_bytes: u64,
+    max_ms: f64,
+    game_faults: u32,
+    game_fault_bytes: u64,
+}
+
 struct Module {
     base: u64,
     end: u64,
@@ -81,6 +103,8 @@ struct State {
     total: HashMap<usize, Agg>,
     /// Worst DPC/ISR in the last few seconds, for the console.
     recent: Vec<(i64, f64, usize)>,
+    disk: DiskAgg,
+    disk_sec: i64,
 }
 
 impl State {
@@ -141,6 +165,8 @@ fn image_name(d: &[u8]) -> Option<String> {
 pub fn start(app: Arc<App>) -> Result<Running> {
     let per_sec = app.session.sink("drivers_1s", "t_us,driver,dpc_n,dpc_total_us,dpc_max_us,isr_n,isr_total_us,isr_max_us");
     let long = app.session.sink("driver_long", "t_us,kind,driver,dur_us,cpu");
+    let disk_1s = app.session.sink("disk_1s", "t_us,reads,read_mb,writes,write_mb,max_io_ms,game_hard_faults,game_fault_mb");
+    let disk_slow = app.session.sink("disk_slow", "t_us,kind,size_kb,ms,disk");
     let health = app.session.sink("etw_health_kernel", "t_us,session,events_lost,rt_buffers_lost,buffers_written");
     let state = Arc::new(Mutex::new(State {
         modules: Vec::new(),
@@ -151,15 +177,77 @@ pub fn start(app: Arc<App>) -> Result<Running> {
         this_sec: HashMap::new(),
         total: HashMap::new(),
         recent: Vec::new(),
+        disk: DiskAgg::default(),
+        disk_sec: 0,
     }));
     let st = state.clone();
     let a = app.clone();
     let per_sec_cb = per_sec.clone();
+    let disk_cb = disk_1s.clone();
+    let mut schemas = super::etw::SchemaCache::default();
+    let mut offsets: Vec<((bool, u8), [Option<(usize, usize)>; 3])> = Vec::new();
     let freq = app.session.clock.freq() as f64;
-    let flags = etw::KERNEL_FLAG_DPC | etw::KERNEL_FLAG_INTERRUPT | etw::KERNEL_FLAG_IMAGE_LOAD;
+    let mut flags = etw::KERNEL_FLAG_DPC | etw::KERNEL_FLAG_INTERRUPT | etw::KERNEL_FLAG_IMAGE_LOAD | etw::KERNEL_FLAG_DISK_IO | etw::KERNEL_FLAG_HARD_FAULTS;
+    if std::env::var_os("LAGSCOPE_NO_DISK").is_some() {
+        flags &= !(etw::KERNEL_FLAG_DISK_IO | etw::KERNEL_FLAG_HARD_FAULTS);
+    }
     let sess = RealtimeSession::start_kernel("LagScope-Kernel", flags, move |ev: &Event| {
         let g = ev.provider();
         let d = ev.data();
+        // Cheap filtering first: most kernel events need no lock and no decoding.
+        if same(&g, &DISKIO) || same(&g, &PAGEFAULT) {
+            let op = ev.opcode();
+            let disk = same(&g, &DISKIO) && matches!(op, OP_DISK_READ | OP_DISK_WRITE);
+            let fault = !disk && same(&g, &PAGEFAULT) && op == OP_HARD_FAULT && a.is_game_pid(ev.pid());
+            if !disk && !fault {
+                return;
+            }
+            // Field offsets come from the event schema, resolved once per event layout.
+            let key = (disk, ev.version());
+            let off = match offsets.iter().find(|o| o.0 == key) {
+                Some(o) => o.1,
+                None => {
+                    let Some(schema) = schemas.get(ev) else { return };
+                    let f = |n: &str| schema.field(n).map(|f| (f.offset, f.size));
+                    let o = if disk { [f("TransferSize"), f("HighResResponseTime"), f("DiskNumber")] } else { [f("ByteCount"), None, None] };
+                    offsets.push((key, o));
+                    o
+                }
+            };
+            let read = |o: Option<(usize, usize)>| -> u64 {
+                o.and_then(|(at, n)| d.get(at..at + n)).map(|b| b.iter().rev().fold(0u64, |acc, x| acc << 8 | *x as u64)).unwrap_or(0)
+            };
+            let t = a.session.clock.us_from_raw(ev.timestamp());
+            let sec = t.div_euclid(1_000_000);
+            let mut s = st.lock().unwrap();
+            if sec != s.disk_sec {
+                let prev = s.disk_sec;
+                flush_disk(&mut s.disk, prev, &disk_cb);
+                s.disk_sec = sec;
+            }
+            if disk {
+                let size = read(off[0]);
+                let ms = read(off[1]) as f64 * 1000.0 / freq;
+                if op == OP_DISK_READ {
+                    s.disk.reads += 1;
+                    s.disk.read_bytes += size;
+                } else {
+                    s.disk.writes += 1;
+                    s.disk.write_bytes += size;
+                }
+                if ms < 60_000.0 {
+                    s.disk.max_ms = s.disk.max_ms.max(ms);
+                    if ms >= SLOW_IO_MS {
+                        let start = t - (ms * 1000.0) as i64;
+                        row!(disk_slow, "{start},{},{},{ms:.0},{}", if op == OP_DISK_READ { 'R' } else { 'W' }, size / 1024, read(off[2]));
+                    }
+                }
+            } else {
+                s.disk.game_faults += 1;
+                s.disk.game_fault_bytes += read(off[0]);
+            }
+            return;
+        }
         let mut s = st.lock().unwrap();
         if same(&g, &IMAGE) {
             // Load (10) and rundown of already loaded modules (3); kernel modules only.
@@ -232,6 +320,8 @@ pub fn start(app: Arc<App>) -> Result<Running> {
     r.on_stopped(move || {
         let mut s = state.lock().unwrap();
         flush_second(&mut s, &per_sec);
+        let ds = s.disk_sec;
+        flush_disk(&mut s.disk, ds, &disk_1s);
         let mut rows: Vec<serde_json::Value> = s
             .total
             .iter()
@@ -251,6 +341,25 @@ pub fn start(app: Arc<App>) -> Result<Running> {
         a.session.meta_set("driver_latency", serde_json::json!({ "buckets_us": BUCKETS_US, "modules": s.modules.len(), "drivers": rows }));
     });
     Ok(r)
+}
+
+fn flush_disk(g: &mut DiskAgg, sec: i64, sink: &Sink) {
+    if g.reads + g.writes + g.game_faults == 0 {
+        return;
+    }
+    row!(
+        sink,
+        "{},{},{:.2},{},{:.2},{:.1},{},{:.2}",
+        sec * 1_000_000,
+        g.reads,
+        g.read_bytes as f64 / 1_048_576.0,
+        g.writes,
+        g.write_bytes as f64 / 1_048_576.0,
+        g.max_ms,
+        g.game_faults,
+        g.game_fault_bytes as f64 / 1_048_576.0
+    );
+    *g = DiskAgg::default();
 }
 
 /// Writes the finished second: a total row, plus drivers with a run of 100 us or more.

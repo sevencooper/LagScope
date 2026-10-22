@@ -27,6 +27,11 @@ pub enum Kind {
     GameBurst,
     /// One driver's DPC or interrupt handler ran >= 1 ms.
     DriverLatency,
+    /// A single disk I/O took >= 100 ms.
+    DiskSlow,
+    /// The game read a lot from disk through page faults in one second (asset streaming
+    /// or memory paging).
+    GamePaging,
 }
 
 impl Kind {
@@ -50,6 +55,8 @@ impl Kind {
             Kind::Paging => "memory pressure (paging)",
             Kind::GameBurst => "game region-ping burst",
             Kind::DriverLatency => "driver DPC/ISR",
+            Kind::DiskSlow => "slow disk I/O",
+            Kind::GamePaging => "game reading from disk",
         }
     }
 }
@@ -186,6 +193,8 @@ pub struct Analysis {
     pub gap_correlation: BTreeMap<String, f64>,
     pub gateway_spike_correlation: BTreeMap<String, f64>,
     pub periodicity: Vec<Periodicity>,
+    /// Of in-match frame hitches >= 50 ms: fraction coinciding with each local cause.
+    pub hitch_correlation: BTreeMap<String, f64>,
     /// Results of a Wi-Fi check session (test windows), if this was one.
     pub wifi_check: Option<super::experiments::Outcome>,
     /// Wi-Fi driver commands that repeatedly came right before router-ping freezes.
@@ -455,6 +464,27 @@ fn driver_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
             drv,
             us / 1000.0,
             format!("{drv} {} ran {:.2} ms", if *isr { "interrupt handler" } else { "DPC" }, us / 1000.0),
+        ));
+    }
+}
+
+/// The game page-faulting this much data in from disk within one second counts as a
+/// streaming/paging burst.
+const GAME_FAULT_MB: f64 = 8.0;
+const DISK_SLOW_MS: f64 = 100.0;
+
+fn disk_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
+    for (t, ms, kb) in d.disk_slow.iter().filter(|x| x.1 >= DISK_SLOW_MS) {
+        out.push(Anomaly::new(*t, (*ms * 1000.0) as i64, Kind::DiskSlow, "disk", *ms, format!("one disk I/O ({kb:.0} KB) took {ms:.0} ms")));
+    }
+    for s in d.disk_1s.iter().filter(|s| s.game_fault_mb >= GAME_FAULT_MB) {
+        out.push(Anomaly::new(
+            s.t,
+            1_000_000,
+            Kind::GamePaging,
+            "game",
+            s.game_fault_mb,
+            format!("the game read {:.0} MB from disk via page faults ({:.0} faults) in one second", s.game_fault_mb, s.game_faults),
         ));
     }
 }
@@ -807,10 +837,11 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
     let traffic = biggest(&[Kind::TrafficBurst], None);
     let dpc = biggest(&[Kind::DpcSpike], None);
     let drv = biggest(&[Kind::DriverLatency], None);
+    let disk = biggest(&[Kind::GamePaging, Kind::DiskSlow], None);
     let gpu = biggest(&[Kind::GpuLimit, Kind::Paging], None);
 
     let mut ev: Vec<String> = Vec::new();
-    for x in [&in_gap, &out_gap, &frame, &stall, &gw, &hop2, &inet, &server, &traffic, &dpc, &drv, &gpu].into_iter().flatten() {
+    for x in [&in_gap, &out_gap, &frame, &stall, &gw, &hop2, &inet, &server, &traffic, &dpc, &drv, &disk, &gpu].into_iter().flatten() {
         ev.push(format!("{:+.1}s {}: {}", (x.t - t) as f64 / 1e6, x.kind.label(), x.detail));
     }
     for w in wifi.iter().take(4) {
@@ -826,6 +857,8 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
     let (culprit, category, confidence): (String, &'static str, &'static str) = if frame_ms >= 80.0 && gap_ms < 80.0 {
         let why = if let Some(x) = drv.as_ref().filter(|x| x.value >= 2.0) {
             format!("a driver held up a CPU core: {}", x.detail)
+        } else if let Some(x) = disk.as_ref() {
+            format!("the game waited for the disk: {}", x.detail)
         } else if stall.is_some() {
             "a whole-system stall (driver / DPC / firmware) froze the PC".to_string()
         } else if gpu.is_some() {
@@ -951,6 +984,7 @@ pub fn analyze(d: &Data) -> Analysis {
     if !d.events.iter().any(|e| e.kind == "exp") {
         driver_anomalies(d, &mut an);
     }
+    disk_anomalies(d, &mut an);
     an.sort_by_key(|a| (a.t, a.kind));
 
     // Correlations for noticeable game stalls.
@@ -1015,6 +1049,20 @@ pub fn analyze(d: &Data) -> Analysis {
         }
     }
 
+    let hitches: Vec<&Anomaly> = an.iter().filter(|a| a.kind == Kind::FrameHitch && a.in_match && a.value >= 50.0).collect();
+    if !hitches.is_empty() {
+        let mut c = BTreeMap::new();
+        if !d.disk_1s.is_empty() {
+            c.insert("game reading from disk".into(), corr(&an, &hitches, &[Kind::GamePaging], None, 1_000_000, 200_000));
+            c.insert("slow disk I/O".into(), corr(&an, &hitches, &[Kind::DiskSlow], None, 300_000, 100_000));
+        }
+        if !d.driver_1s.is_empty() {
+            c.insert("driver DPC/ISR".into(), corr(&an, &hitches, &[Kind::DriverLatency], None, 300_000, 100_000));
+        }
+        c.insert("system stall".into(), corr(&an, &hitches, &[Kind::Stall], None, 300_000, 100_000));
+        c.insert("GPU limit / memory pressure".into(), corr(&an, &hitches, &[Kind::GpuLimit, Kind::Paging], None, 1_000_000, 200_000));
+        res.hitch_correlation = c;
+    }
     res.wifi_check = super::experiments::from_session(d);
     res.driver_cmds = driver_cmd_correlation(d, &an);
     res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1)).collect();

@@ -8,7 +8,7 @@ Getting started
       (it needs administrator rights to measure network, Wi-Fi and driver details).
     - If a blue "Windows protected your PC" box appears: click "More info",
       then "Run anyway" (the program is not code-signed, that is all).
-* The LagScope window has three tabs: Record, Wi-Fi check and Sessions.
+* The LagScope window has four tabs: Record, Wi-Fi check, Network and Sessions.
 
 
 A. Wi-Fi check & fix  (if you play on Wi-Fi - about 15 minutes)
@@ -46,6 +46,33 @@ B. Record while playing
    "Open report"; a file named LagScope_....zip is saved next to lagscope.exe.
 
 
+Automatic recording (optional)
+------------------------------
+On the Record tab, tick "Record automatically whenever one of these games runs".
+LagScope then sits in the notification area (tray, next to the clock) - closing the
+window keeps it there - and records every session of a supported game, building
+the report when the game exits. Tick "Start LagScope with Windows" to have it
+start hidden at logon. Right-click the tray icon to open it, turn auto-record off,
+or exit.
+
+
+Network tests (Network tab)
+---------------------------
+* Router: shows which router/gateway you have and your ISP, with model-specific tips.
+* Latency under load: downloads and uploads as fast as possible for ~12 s each
+  while pinging; a grade A+..F tells whether busy connections (downloads, uploads,
+  streaming by anyone in the house) will make games lag ("bufferbloat"). Uses up to
+  1-2 GB of data on a fast line, so don't run it on a metered connection.
+* Wi-Fi neighbourhood: how crowded your Wi-Fi channel is compared with others.
+Each test is saved as a session (Sessions tab) with its own report.
+
+
+Comparing sessions
+------------------
+On the Sessions tab, tick two sessions and click "Compare" to see them side by
+side (e.g. before and after a change) - green = better, red = worse.
+
+
 C. Send back (if someone is helping you)
 ----------------------------------------
 Send the LagScope_....zip files (the Sessions tab -> "Folder" shows where they
@@ -78,6 +105,11 @@ What LagScope does and does not do
   anti-cheat systems such as Easy Anti-Cheat.
 * LagScope itself uses well under 1% of the CPU; its window redraws at most once a
   second while recording and not at all when idle.
+* The latency-under-load test is the only feature that sends real traffic to the
+  internet (to Cloudflare's speed-test service), and only when you click it. The
+  router lookup only talks to your own router (plus one name lookup).
+* Recording also notes disk activity (how much the game reads from disk), to tell
+  stutter from asset loading apart from network lag.
 * The Wi-Fi check changes settings ONLY after you click Yes, one at a time, and puts
   each one back after its test. The settings it may test: Wi-Fi adapter roaming,
   power saving, throughput acceleration, preferred band, Wi-Fi Direct, Location
@@ -93,3 +125,8 @@ Command line (optional; lagscope.exe --help lists everything)
   lagscope.exe --wifi-check       the Wi-Fi check in a console window
   lagscope.exe --undo             undo the settings LagScope kept
   lagscope.exe games              list the game profiles ("auto" = any game)
+  lagscope.exe compare <A> <B>    compare two session folders
+  lagscope.exe load-test          latency under load (bufferbloat) in the console
+  lagscope.exe wifi-scan          Wi-Fi neighbourhood in the console
+  lagscope.exe router             router / ISP identification
+  lagscope.exe startup on|off     start hidden in the tray with Windows

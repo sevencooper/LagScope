@@ -144,6 +144,17 @@ pub struct ProcNet {
     pub rx: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DiskSec {
+    pub t: i64,
+    pub read_mb: f64,
+    pub write_mb: f64,
+    pub max_io_ms: f64,
+    /// Hard page faults of the game (code/data read back from disk) and their volume.
+    pub game_faults: f64,
+    pub game_fault_mb: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Note {
     pub t: i64,
@@ -182,6 +193,10 @@ pub struct Data {
     pub driver_long: Vec<(i64, bool, String, f64)>,
     /// Worst DPC/ISR run per second over all drivers: (t, us).
     pub driver_1s: Vec<(i64, f64)>,
+    /// Disk activity per second.
+    pub disk_1s: Vec<DiskSec>,
+    /// Single disk I/Os that took >= 50 ms: (start t, ms, KB).
+    pub disk_slow: Vec<(i64, f64, f64)>,
     pub etw_lost: u64,
     pub files: Vec<String>,
 }
@@ -419,6 +434,25 @@ pub fn load(dir: &Path) -> Result<Data> {
         }
     })?;
     seen("drivers_1s", present, &mut files);
+    let present = each(dir, "disk_1s", |r| {
+        if let Some(t) = r.i("t_us") {
+            d.disk_1s.push(DiskSec {
+                t,
+                read_mb: r.f("read_mb").unwrap_or(0.0),
+                write_mb: r.f("write_mb").unwrap_or(0.0),
+                max_io_ms: r.f("max_io_ms").unwrap_or(0.0),
+                game_faults: r.f("game_hard_faults").unwrap_or(0.0),
+                game_fault_mb: r.f("game_fault_mb").unwrap_or(0.0),
+            });
+        }
+    })?;
+    seen("disk_1s", present, &mut files);
+    let present = each(dir, "disk_slow", |r| {
+        if let (Some(t), Some(ms)) = (r.i("t_us"), r.f("ms")) {
+            d.disk_slow.push((t, ms, r.f("size_kb").unwrap_or(0.0)));
+        }
+    })?;
+    seen("disk_slow", present, &mut files);
     for name in ["etw_health", "etw_health_frames", "etw_health_wlan", "etw_health_ndis", "etw_health_kernel"] {
         let mut lost = 0u64;
         each(dir, name, |r| lost = lost.max(r.i("events_lost").unwrap_or(0) as u64))?;

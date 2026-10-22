@@ -252,7 +252,12 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if dpc > 0 {
         f.push(format!("{dpc} samples with high DPC/interrupt load (≥5% of CPU time)."));
     }
+    // Router identification and its advice (advice only when the network is implicated).
+    if let Some(name) = d.meta["router"]["name"].as_str().filter(|n| !n.is_empty()) {
+        f.push(format!("Router: {name} at {}.", d.meta["router"]["gateway"].as_str().unwrap_or("?")));
+    }
     driver_findings(d, r, &mut f, &mut rec);
+    disk_findings(d, r, &mut f, &mut rec);
     if count(Kind::GpuLimit) > 0 {
         f.push("The GPU hit thermal / hardware slowdown limits during the session.".into());
     }
@@ -331,9 +336,44 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if !r.verdicts.is_empty() || s.gaps_100ms > 0 {
         rec.push("Compare with a control session: record a game that feels fine (pick it on the Record tab, or use Auto-detect) and compare the two reports.".into());
     }
+    let network_issue = headline.contains("Wi-Fi") || headline.contains("router") || headline.contains("network hop") || r.wifi_check.as_ref().is_some_and(|o| o.problem);
+    if network_issue {
+        for n in d.meta["router"]["notes"].as_array().into_iter().flatten().filter_map(|n| n.as_str()) {
+            rec.insert(rec.len().min(2), n.to_string());
+        }
+    }
     r.headline = headline;
     r.findings = f;
     r.recommendations = rec;
+}
+
+/// Disk activity summary and whether frame hitches line up with the game loading from disk.
+fn disk_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) {
+    if d.disk_1s.is_empty() {
+        return;
+    }
+    let peak = d.disk_1s.iter().map(|s| s.read_mb).fold(0.0, f64::max);
+    let peak_w = d.disk_1s.iter().map(|s| s.write_mb).fold(0.0, f64::max);
+    let slowest = d.disk_1s.iter().map(|s| s.max_io_ms).fold(0.0, f64::max);
+    let fault_mb: f64 = d.disk_1s.iter().map(|s| s.game_fault_mb).sum();
+    let slow = r.anomalies.iter().filter(|a| a.kind == Kind::DiskSlow).count();
+    f.push(format!(
+        "Disk: peak reads {peak:.0} MB/s, writes {peak_w:.0} MB/s, slowest single I/O {slowest:.0} ms{}; the game read {fault_mb:.0} MB from disk through page faults.",
+        if slow > 0 { format!(" ({slow} I/Os took 100 ms or more)") } else { String::new() }
+    ));
+    let paging = r.hitch_correlation.get("game reading from disk").copied().unwrap_or(0.0);
+    let slow_c = r.hitch_correlation.get("slow disk I/O").copied().unwrap_or(0.0);
+    let n = r.anomalies.iter().filter(|a| a.kind == Kind::FrameHitch && a.in_match && a.value >= 50.0).count();
+    if n >= 3 && (paging >= 0.4 || slow_c >= 0.3) {
+        f.push(format!(
+            "Frame hitches line up with disk activity: {} of {n} hitches came while the game was loading data from disk{}.",
+            pct(paging),
+            if slow_c > 0.0 { format!(", {} with a slow disk I/O", pct(slow_c)) } else { String::new() }
+        ));
+        rec.push("Stutter comes with the game loading data from disk: install the game on an SSD (ideally NVMe), keep some free space on it, close memory-hungry programs (browsers) while playing, and expect the first matches after a game or driver update to stutter more while shader caches rebuild.".into());
+    } else if slow >= 5 {
+        rec.push(format!("{slow} disk I/Os took 100 ms or more: the drive was very busy (antivirus scan, Windows Update, downloads) or may be failing. Check what else uses the disk while playing."));
+    }
 }
 
 /// LatencyMon-style summary of driver DPC/ISR times, plus what they coincided with.

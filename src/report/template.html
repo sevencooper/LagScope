@@ -219,6 +219,11 @@ chart("Wi-Fi", [
 if (S.driver && S.driver.some(v => v != null)) chart("Driver latency: longest DPC/interrupt run (ms)", [
   { label: "worst driver run", data: S.driver, color: C(5), unit: " ms", span: true },
 ], { unit: "ms", y: { range: (u, mn, mx) => [0, Math.max(1, mx)] } });
+if (S.disk_read && S.disk_read.some(v => v != null)) chart("Disk", [
+  { label: "reads MB/s", data: S.disk_read, color: C(1), span: true },
+  { label: "game page-faulted MB/s", data: S.game_fault, color: C(2), span: true },
+  { label: "slowest I/O ms", data: S.disk_ms, color: css("--bad"), span: true },
+]);
 chart("System stalls & CPU", [
   { label: "stall max ms", data: S.stall, color: css("--bad"), unit: " ms" },
   { label: "DPC+IRQ %", data: S.dpc, color: C(5), unit: "%" },

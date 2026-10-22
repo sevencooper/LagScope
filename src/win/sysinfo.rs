@@ -226,6 +226,16 @@ pub fn start(app: Arc<App>) -> Running {
         );
         a.session.write_text("sysinfo/system.txt", &redact(&ps));
         summarize_wlan(&a);
+        // Router / ISP identification (local network only, plus one reverse DNS lookup).
+        if let Some(gw) = super::probes::route_to(std::net::Ipv4Addr::new(1, 1, 1, 1)).and_then(|r| r.gateway) {
+            if !a.stopping() {
+                let hops = super::probes::traceroute(std::net::Ipv4Addr::new(1, 1, 1, 1), 4);
+                let hop2 = hops.iter().filter_map(|h| h.ip).find(|ip| *ip != gw && !ip.is_private());
+                let r = super::router::identify(gw, hop2);
+                a.session.event("router", format!("{}{}", r.name, if r.isp_host.is_empty() { String::new() } else { format!(" - ISP hop {}", r.isp_host) }));
+                a.session.meta_set("router", serde_json::to_value(&r).unwrap_or_default());
+            }
+        }
         a.session.event("collector", format!("sysinfo: snapshot written ({:.1}s)", t0.elapsed().as_secs_f64()));
     });
     Running::threads("sysinfo", vec![t])

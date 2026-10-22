@@ -136,6 +136,13 @@ fn series(d: &Data, a: &Analysis) -> Value {
     for (ts, _, _, us) in &d.driver_long {
         max_into(&mut drv, b.idx(*ts), us / 1000.0);
     }
+    let (mut disk_read, mut disk_ms, mut game_fault) = (empty(), empty(), empty());
+    for x in &d.disk_1s {
+        let i = b.idx(x.t + 500_000);
+        max_into(&mut disk_read, i, x.read_mb);
+        max_into(&mut disk_ms, i, x.max_io_ms);
+        max_into(&mut game_fault, i, x.game_fault_mb);
+    }
     let mut stall = empty();
     for &(ts, m) in &d.stall_1s {
         max_into(&mut stall, b.idx(ts + 500_000), m as f64 / 1000.0);
@@ -196,7 +203,7 @@ fn series(d: &Data, a: &Analysis) -> Value {
         "frame": round(frame, 1),
         "probes": probes, "loss": loss,
         "quality": round(quality, 0), "rssi": round(rssi, 0), "tx_rate": round(rate, 0),
-        "stall": round(stall, 1), "driver": round(drv, 2), "dpc": round(dpc, 2), "cpu": round(cpu, 0), "maxcore": round(maxcore, 0),
+        "stall": round(stall, 1), "driver": round(drv, 2), "disk_read": round(disk_read, 1), "disk_ms": round(disk_ms, 0), "game_fault": round(game_fault, 1), "dpc": round(dpc, 2), "cpu": round(cpu, 0), "maxcore": round(maxcore, 0),
         "gpu": round(gpu, 0), "gpu_power": round(gpupow, 0), "other_mbit": round(other, 2),
     })
 }

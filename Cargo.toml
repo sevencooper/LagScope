@@ -1,6 +1,6 @@
 [package]
 name = "lagscope"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Lag/hiccup diagnostic recorder for The Finals (and other games) on Windows"
 license = "MIT"
@@ -34,8 +34,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WiFi",
     "Win32_Networking_WinSock",
+    "Win32_Networking_WinHttp",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
     "Win32_Media",
     "Win32_Media_Multimedia",
     "Win32_System_IO",

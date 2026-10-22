@@ -13,13 +13,18 @@ pub mod frames;
 pub mod gui;
 pub mod gpu;
 pub mod hotkey;
+pub mod loadtest;
 pub mod net;
+pub mod netreport;
 pub mod probes;
 pub mod procwatch;
+pub mod router;
 pub mod stall;
 pub mod sysinfo;
+pub mod tray;
 pub mod wifi;
 pub mod wificheck;
+pub mod wifiscan;
 pub mod wlan_etw;
 
 use std::sync::{Arc, Mutex};

@@ -121,16 +121,27 @@ fn settings_path() -> Option<std::path::PathBuf> {
     std::env::var("ProgramData").ok().map(|p| std::path::PathBuf::from(p).join("LagScope").join("settings.json"))
 }
 
-pub fn last_game() -> Option<String> {
+/// One value from %ProgramData%\LagScope\settings.json.
+pub fn setting(key: &str) -> Option<serde_json::Value> {
     let s = std::fs::read_to_string(settings_path()?).ok()?;
-    serde_json::from_str::<serde_json::Value>(&s).ok()?["game"].as_str().map(String::from)
+    serde_json::from_str::<serde_json::Value>(&s).ok()?.get(key).cloned()
+}
+
+/// Sets one value, keeping the others.
+pub fn set_setting(key: &str, value: serde_json::Value) {
+    let Some(p) = settings_path() else { return };
+    let mut all: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    all.insert(key.into(), value);
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    let _ = std::fs::write(p, serde_json::Value::Object(all).to_string());
+}
+
+pub fn last_game() -> Option<String> {
+    setting("game")?.as_str().map(String::from)
 }
 
 pub fn save_last_game(id: &str) {
-    if let Some(p) = settings_path() {
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, serde_json::json!({ "game": id }).to_string());
-    }
+    set_setting("game", id.into());
 }
 
 pub fn find<'a>(all: &'a [Profile], key: &str) -> Option<&'a Profile> {
