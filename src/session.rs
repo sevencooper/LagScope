@@ -14,20 +14,31 @@ use serde_json::{Map, Value};
 use crate::clock::{self, Clock};
 
 pub struct Sink {
-    w: Mutex<BufWriter<File>>,
+    /// None once closed (late rows are dropped).
+    w: Mutex<Option<BufWriter<File>>>,
 }
 
 impl Sink {
     pub fn row(&self, line: std::fmt::Arguments) {
-        if let Ok(mut w) = self.w.lock() {
-            let _ = w.write_fmt(line);
-            let _ = w.write_all(b"\n");
+        if let Ok(mut g) = self.w.lock() {
+            if let Some(w) = g.as_mut() {
+                let _ = w.write_fmt(line);
+                let _ = w.write_all(b"\n");
+            }
         }
     }
 
     pub fn flush(&self) {
-        if let Ok(mut w) = self.w.lock() {
-            let _ = w.flush();
+        if let Ok(mut g) = self.w.lock() {
+            if let Some(w) = g.as_mut() {
+                let _ = w.flush();
+            }
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut g) = self.w.lock() {
+            *g = None;
         }
     }
 }
@@ -80,7 +91,7 @@ impl Session {
                 crate::ui::log(format!("cannot create {name}.csv: {e:#}"));
                 // Fall back to a sink that writes to the null device so collectors keep running.
                 Arc::new(Sink {
-                    w: Mutex::new(BufWriter::new(File::create(null_path()).expect("null device"))),
+                    w: Mutex::new(Some(BufWriter::new(File::create(null_path()).expect("null device")))),
                 })
             }
         };
@@ -114,6 +125,13 @@ impl Session {
         }
     }
 
+    /// Closes every CSV file (so the session folder can be deleted).
+    pub fn close_all(&self) {
+        for s in self.sinks.lock().unwrap().iter() {
+            s.close();
+        }
+    }
+
     pub fn write_meta(&self) -> Result<()> {
         let m = self.meta.lock().unwrap().clone();
         let text = serde_json::to_string_pretty(&Value::Object(m))?;
@@ -134,7 +152,7 @@ fn open_sink(dir: &Path, name: &str, header: &str) -> Result<Sink> {
     let f = File::create(dir.join(format!("{name}.csv")))?;
     let mut w = BufWriter::with_capacity(256 * 1024, f);
     writeln!(w, "{header}")?;
-    Ok(Sink { w: Mutex::new(w) })
+    Ok(Sink { w: Mutex::new(Some(w)) })
 }
 
 fn null_path() -> &'static str {

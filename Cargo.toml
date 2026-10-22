@@ -1,6 +1,6 @@
 [package]
 name = "lagscope"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 description = "Lag/hiccup diagnostic recorder for The Finals (and other games) on Windows"
 license = "MIT"
@@ -13,6 +13,8 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2-zli
 
 [target.'cfg(windows)'.dependencies]
 nvml-wrapper = "0.13"
+# GUI: OpenGL renderer, no persistence/accessibility extras (small, low overhead).
+eframe = { version = "=0.36.2", default-features = false, features = ["glow", "default_fonts"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

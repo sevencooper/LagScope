@@ -12,8 +12,20 @@ static PENDING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DRAWN: Mutex<usize> = Mutex::new(0);
 
+type LogSink = Box<dyn Fn(String) + Send + Sync>;
+static SINK: std::sync::OnceLock<LogSink> = std::sync::OnceLock::new();
+
+/// Sends every log line to `f` instead of the console (the GUI).
+pub fn set_sink(f: impl Fn(String) + Send + Sync + 'static) {
+    let _ = SINK.set(Box::new(f));
+}
+
 pub fn log(line: impl Into<String>) {
     let line = line.into();
+    if let Some(s) = SINK.get() {
+        s(line);
+        return;
+    }
     if !ACTIVE.load(Ordering::Relaxed) {
         println!("{line}");
         return;

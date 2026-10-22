@@ -15,6 +15,21 @@ static APP: OnceLock<Arc<App>> = OnceLock::new();
 /// Set once the session has been finalised; the close handler waits for it.
 pub static FINISHED: AtomicBool = AtomicBool::new(false);
 
+/// Makes sure console output goes somewhere when run with arguments: keep redirected or
+/// inherited handles, else attach to the parent terminal, else open a console window.
+/// (The exe is a GUI-subsystem program so a double-click opens no console.)
+pub fn ensure() {
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !h.is_null() && h != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            AllocConsole();
+        }
+    }
+}
+
 pub fn setup() {
     unsafe {
         let out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -145,8 +160,21 @@ pub fn read_choice(keys: &str, enter: Option<char>) -> char {
     }
 }
 
+type Prompter = Box<dyn Fn(&str, bool) -> bool + Send + Sync>;
+static PROMPTER: OnceLock<Prompter> = OnceLock::new();
+
+/// Lets the GUI answer yes/no questions instead of the console.
+pub fn set_prompter(f: impl Fn(&str, bool) -> bool + Send + Sync + 'static) {
+    let _ = PROMPTER.set(Box::new(f));
+}
+
 /// "Question? [Y/n]" (Enter = default). Prints the answer.
 pub fn ask_yes_no(question: &str, default_yes: bool) -> bool {
+    if let Some(p) = PROMPTER.get() {
+        let a = p(question.trim(), default_yes);
+        crate::ui::log(format!("{} -> {}", question.trim(), if a { "yes" } else { "no" }));
+        return a;
+    }
     print!("{question} {} ", if default_yes { "[Y/n]" } else { "[y/N]" });
     let c = read_choice("yn", Some(if default_yes { 'y' } else { 'n' }));
     println!("{}", if c == 'y' { "yes" } else { "no" });

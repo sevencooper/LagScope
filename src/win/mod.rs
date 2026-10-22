@@ -5,10 +5,12 @@
 pub mod capture;
 pub mod console;
 pub mod cpu;
+pub mod drivers;
 pub mod dump;
 pub mod etw;
 pub mod fixes;
 pub mod frames;
+pub mod gui;
 pub mod gpu;
 pub mod hotkey;
 pub mod net;
@@ -43,6 +45,21 @@ impl Running {
     pub fn set_stop(&mut self, f: impl FnOnce() + Send + 'static) {
         self.stop = Some(Box::new(f));
         self.stop_after_join = true;
+    }
+
+    pub fn add_thread(&mut self, t: JoinHandle<()>) {
+        self.threads.push(t);
+    }
+
+    /// Runs `f` after the collector has fully stopped (after its existing stop action).
+    pub fn on_stopped(&mut self, f: impl FnOnce() + Send + 'static) {
+        let prev = self.stop.take();
+        self.stop = Some(Box::new(move || {
+            if let Some(p) = prev {
+                p();
+            }
+            f();
+        }));
     }
 
     pub fn stop(&mut self) {
@@ -124,6 +141,12 @@ pub fn system32(rel: &str) -> std::path::PathBuf {
 
 /// Restrict DLL loading for the rest of the process to System32 (no DLLs from the exe's
 /// folder or the current directory).
+/// Opens a file or folder with its default program (report in the browser, folder in
+/// Explorer).
+pub fn open_path(p: &std::path::Path) {
+    let _ = std::process::Command::new(windows_dir().join("explorer.exe")).arg(p).spawn();
+}
+
 pub fn harden_dll_search() {
     use windows_sys::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
     unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };

@@ -89,14 +89,18 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
             ));
             continue;
         }
+        // The server path is usually probed via a router that answers TTL-limited pings;
+        // routers rate-limit those answers, so a few % "loss" there is normal.
+        let via_router = p.target == "server" && p.ip.contains('→') || (p.target == "server" && d.events.iter().any(|e| e.detail.contains("TTL-limited")));
         f.push(format!(
-            "Ping {} ({}): median {:.1} ms, p99 {:.1} ms, max {:.0} ms, loss {:.2}%, {} spikes ({:.0}/h).",
+            "Ping {} ({}): median {:.1} ms, p99 {:.1} ms, max {:.0} ms, loss {:.2}%{}, {} spikes ({:.0}/h).",
             p.target,
             p.ip,
             p.p50_ms,
             p.p99_ms,
             p.max_ms,
             loss * 100.0,
+            if via_router && loss > 0.0 && loss < 0.1 { " (a router on the path answering on behalf of the server; routers limit such answers, so some loss here is normal)" } else { "" },
             p.spikes,
             p.spikes as f64 / hours
         ));
@@ -248,6 +252,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if dpc > 0 {
         f.push(format!("{dpc} samples with high DPC/interrupt load (≥5% of CPU time)."));
     }
+    driver_findings(d, r, &mut f, &mut rec);
     if count(Kind::GpuLimit) > 0 {
         f.push("The GPU hit thermal / hardware slowdown limits during the session.".into());
     }
@@ -307,7 +312,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         c
     } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
         format!("{n} of {} marked spikes point to: {}", r.verdicts.len(), category_text(cat))
-    } else if s.gaps_100ms > 0 {
+    } else if s.gaps_100ms >= 3 && s.gaps_100ms as f64 / ((if s.match_s > 0.0 { s.match_s } else { s.active_s }) / 60.0).max(1.0) >= 0.3 {
         let gwc = r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0);
         let fc = r.gap_correlation.get("frame hitch").copied().unwrap_or(0.0);
         if gwc >= 0.4 {
@@ -317,16 +322,92 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         } else {
             "Game stalls occur while your own network looks clean: path to / the game server itself".into()
         }
+    } else if s.gaps_100ms > 0 {
+        format!("No significant problems: only {} brief game-stream stall(s) in the whole session.", s.gaps_100ms)
     } else {
         "No significant problems detected in this session.".into()
     };
 
     if !r.verdicts.is_empty() || s.gaps_100ms > 0 {
-        rec.push("Compare with a control session: run LagScope with `--process <other game>.exe` while playing a game that feels fine.".into());
+        rec.push("Compare with a control session: record a game that feels fine (pick it on the Record tab, or use Auto-detect) and compare the two reports.".into());
     }
     r.headline = headline;
     r.findings = f;
     r.recommendations = rec;
+}
+
+/// LatencyMon-style summary of driver DPC/ISR times, plus what they coincided with.
+fn driver_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) {
+    let Some(list) = d.meta["driver_latency"]["drivers"].as_array() else { return };
+    if r.wifi_check.is_some() {
+        // The check restarts the Wi-Fi adapter on purpose, which makes drivers busy.
+        f.push("Driver latency is not judged in a Wi-Fi check (the check restarts the Wi-Fi adapter on purpose); record a normal session for that.".into());
+        return;
+    }
+    let worst = |v: &serde_json::Value| v["dpc_max_us"].as_f64().unwrap_or(0.0).max(v["isr_max_us"].as_f64().unwrap_or(0.0));
+    // Judge on "effective" time: graphics drivers get 1 ms of extra allowance (their 1-2 ms
+    // DPCs under gaming load are normal).
+    let name = |v: &serde_json::Value| v["driver"].as_str().unwrap_or("?").to_string();
+    let effective = |v: &serde_json::Value| (worst(v) - (super::detect::driver_threshold_us(&name(v)) - super::detect::DRIVER_US)).max(0.0);
+    let Some(top) = list.iter().max_by(|a, b| effective(a).partial_cmp(&effective(b)).unwrap()) else { return };
+    let top_us = effective(top);
+    let names: Vec<String> = list
+        .iter()
+        .take(3)
+        .filter(|v| worst(v) >= 250.0)
+        .map(|v| format!("{} {:.2} ms{}", name(v), worst(v) / 1000.0, if super::detect::is_gpu_driver(&name(v)) { " (graphics)" } else { "" }))
+        .collect();
+    let gpu_note = if list.iter().take(3).any(|v| super::detect::is_gpu_driver(&name(v)) && worst(v) >= 1000.0) {
+        " (graphics drivers are judged from 2 ms: 1-2 ms is normal for them under gaming load)"
+    } else {
+        ""
+    };
+    // Severity depends on how often long runs happen, not just the single worst one: a few
+    // isolated 2-4 ms runs in an hour of gaming are harmless; one every minute is not.
+    let long = r.anomalies.iter().filter(|a| a.kind == Kind::DriverLatency).count();
+    let per_min = long as f64 / (d.duration_us as f64 / 60e6).max(1.0);
+    let verdict = if top_us < 500.0 {
+        "all fine (under 0.5 ms)".to_string()
+    } else if top_us < 1000.0 {
+        "OK (under 1 ms)".to_string()
+    } else if top_us < 8000.0 && per_min < 0.5 {
+        format!("OK - only {long} isolated longer run(s), too rare to matter")
+    } else if top_us < 2000.0 {
+        "elevated (1-2 ms runs, often: can cause small hitches and audio crackle)".to_string()
+    } else {
+        "high (runs over 2 ms, often or very long: they hold up a CPU core long enough to delay network packets, frames and audio)".to_string()
+    };
+    let rare = top_us < 8000.0 && per_min < 0.5;
+    f.push(format!(
+        "Driver latency (longest DPC/interrupt run per driver): {verdict}{gpu_note}{}.",
+        if names.is_empty() { String::new() } else { format!(" - worst: {}", names.join(", ")) }
+    ));
+    if long > 0 {
+        let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+        for a in r.anomalies.iter().filter(|a| a.kind == Kind::DriverLatency) {
+            *per.entry(a.target.as_str()).or_default() += 1;
+        }
+        let mut v: Vec<_> = per.into_iter().collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
+        let txt: Vec<String> = v.iter().take(4).map(|(n, c)| format!("{n} {c}x")).collect();
+        f.push(format!("{long} long driver runs (1 ms or more; graphics drivers 2 ms or more): {}.", txt.join(", ")));
+    }
+    let gc = r.gap_correlation.get("driver DPC/ISR ≥1 ms").copied().unwrap_or(0.0);
+    let pc = r.gateway_spike_correlation.get("driver DPC/ISR ≥1 ms").copied().unwrap_or(0.0);
+    if gc >= 0.3 || pc >= 0.3 {
+        f.push(format!(
+            "Long driver runs line up with network stalls ({} of game stalls, {} of router-ping spikes): a driver on this PC is delaying packets.",
+            pct(gc),
+            pct(pc)
+        ));
+    }
+    if top_us >= 2000.0 && !rare {
+        let n = name(top);
+        rec.push(format!(
+            "Driver '{n}' had DPC/interrupt runs of {:.1} ms. Update or reinstall that driver (for Wi-Fi/LAN/audio/GPU drivers: from the chipset or PC maker), and check its power-saving settings.",
+            worst(top) / 1000.0
+        ));
+    }
 }
 
 pub const ROUTER_STEPS: &str = "Router steps (the PC side is ruled out): 1) unplug the router/gateway for 30 s; 2) in its app or web page, give the 2.4 / 5 / 6 GHz bands separate network names and connect the PC to the 5 GHz one; 3) turn off extras that probe the network regularly (Wi-Fi motion sensing, band steering, 'smart' or auto channel, mesh/extender pods) one at a time; 4) set a fixed channel; 5) if it is an ISP gateway (e.g. Xfinity), ask for a replacement or use your own router.";

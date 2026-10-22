@@ -25,6 +25,8 @@ pub enum Kind {
     GpuLimit,
     Paging,
     GameBurst,
+    /// One driver's DPC or interrupt handler ran >= 1 ms.
+    DriverLatency,
 }
 
 impl Kind {
@@ -47,6 +49,7 @@ impl Kind {
             Kind::GpuLimit => "GPU clock limit",
             Kind::Paging => "memory pressure (paging)",
             Kind::GameBurst => "game region-ping burst",
+            Kind::DriverLatency => "driver DPC/ISR",
         }
     }
 }
@@ -207,9 +210,13 @@ fn sorted(mut v: Vec<f64>) -> Vec<f64> {
 
 /// Endpoints that carry the real-time game stream (most inbound UDP packets).
 pub fn server_endpoints(d: &Data) -> Vec<u32> {
+    let ignore = crate::profile::of_session(&d.meta).ignore_ports;
+    let ignored = |ep: &str| ep.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).is_some_and(|p| ignore.contains(&p));
     let mut counts = vec![0usize; d.endpoints.len()];
     for p in d.packets.iter().filter(|p| p.udp && !p.send) {
-        counts[p.ep as usize] += 1;
+        if !ignored(&d.endpoints[p.ep as usize]) {
+            counts[p.ep as usize] += 1;
+        }
     }
     let max = counts.iter().copied().max().unwrap_or(0);
     let min = if max >= 2500 { (max / 5).max(500) } else { 100 };
@@ -219,20 +226,29 @@ pub fn server_endpoints(d: &Data) -> Vec<u32> {
 const PAUSE_US: i64 = 5_000_000;
 
 /// Gaps in a packet stream. Returns (median interval us, anomalies).
-fn stream_gaps(times: &[i64], kind: Kind, label: &str) -> (f64, Vec<Anomaly>, Vec<f64>) {
+fn stream_gaps(times: &[i64], kind: Kind, label: &str, min_gap: i64) -> (f64, Vec<Anomaly>, Vec<f64>) {
     let gaps: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
     let normal = sorted(gaps.iter().filter(|&&g| g < 1_000_000).map(|&g| g as f64).collect());
     let median = percentile(&normal, 0.5).max(1.0);
     let mut out = Vec::new();
     for (i, &g) in gaps.iter().enumerate() {
-        if g <= 80_000 || g > PAUSE_US {
+        if g <= min_gap || g > PAUSE_US {
+            continue;
+        }
+        // Only a live real-time stream can stall: in lobbies and loading screens some games
+        // send just a few packets per second (>= ~10 pkt/s over the last 3 s required).
+        // The same after the gap: a real stall ends with the stream resuming, not with a
+        // short burst fading into a lobby trickle.
+        let since = times[i] - 3_000_000;
+        let until = times[i + 1] + 3_000_000;
+        if i + 1 - times[..=i].partition_point(|&x| x < since) < 30 || times[i + 1..].partition_point(|&x| x < until) < 30 {
             continue;
         }
         // Judge against the recent send rate: the stream slows down a lot in menus and
         // loading screens, which must not count as gaps.
         let recent = sorted(gaps[i.saturating_sub(64)..i].iter().filter(|&&x| x < 1_000_000).map(|&x| x as f64).collect());
         let local = if recent.len() >= 16 { percentile(&recent, 0.5) } else { median };
-        if (g as f64) <= (4.0 * local).max(80_000.0) {
+        if (g as f64) <= (4.0 * local).max(min_gap as f64) {
             continue;
         }
         let end = times[i + 1];
@@ -415,6 +431,34 @@ fn wifi_anomalies(d: &Data, bogus: bool, out: &mut Vec<Anomaly>) {
     }
 }
 
+/// Driver DPC/ISR runs of 1 ms or more (LatencyMon's "problem" threshold is about 1-2 ms;
+/// shorter runs are normal).
+pub const DRIVER_US: f64 = 1000.0;
+
+/// Graphics drivers routinely run 1-2 ms DPCs under gaming load without visible effect;
+/// they only count from 2 ms.
+pub fn is_gpu_driver(name: &str) -> bool {
+    const GPU: &[&str] = &["nvlddmkm.sys", "amdkmdag.sys", "atikmdag.sys", "atikmpag.sys", "igdkmd64.sys", "igdkmdn64.sys", "igdkmdnd64.sys", "dxgkrnl.sys", "dxgmms2.sys", "dxgmms1.sys"];
+    GPU.iter().any(|g| name.eq_ignore_ascii_case(g))
+}
+
+pub fn driver_threshold_us(name: &str) -> f64 {
+    if is_gpu_driver(name) { 2.0 * DRIVER_US } else { DRIVER_US }
+}
+
+fn driver_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
+    for (t, isr, drv, us) in d.driver_long.iter().filter(|x| x.3 >= driver_threshold_us(&x.2)) {
+        out.push(Anomaly::new(
+            *t,
+            *us as i64,
+            Kind::DriverLatency,
+            drv,
+            us / 1000.0,
+            format!("{drv} {} ran {:.2} ms", if *isr { "interrupt handler" } else { "DPC" }, us / 1000.0),
+        ));
+    }
+}
+
 fn system_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
     for &(t, late) in &d.stalls {
         if late >= 8_000 {
@@ -524,18 +568,27 @@ fn in_phases(phases: &[(i64, i64)], t: i64) -> bool {
 
 /// Match play = seconds where the client sends at a high rate (input/state updates). In
 /// menus, loading screens and while spectating the client sends far less.
-pub fn match_phases(outbound: &[i64]) -> Vec<(i64, i64)> {
-    let mut per_sec: BTreeMap<i64, usize> = BTreeMap::new();
-    for &t in outbound {
-        *per_sec.entry(t.div_euclid(1_000_000)).or_default() += 1;
-    }
+pub fn match_phases(outbound: &[i64], inbound: &[i64]) -> Vec<(i64, i64)> {
+    let count = |v: &[i64]| {
+        let mut m: BTreeMap<i64, usize> = BTreeMap::new();
+        for &t in v {
+            *m.entry(t.div_euclid(1_000_000)).or_default() += 1;
+        }
+        m
+    };
+    let (per_sec, per_sec_in) = (count(outbound), count(inbound));
     let p90 = percentile(&sorted(per_sec.values().map(|&n| n as f64).collect()), 0.9);
     if p90 < 20.0 {
         return vec![];
     }
     let thr = (p90 * 0.5) as usize;
+    // Some games (e.g. CS2) keep sending at full rate while loading, with the server
+    // sending only a trickle: match play needs both directions busy.
+    let p90_in = percentile(&sorted(per_sec_in.values().map(|&n| n as f64).collect()), 0.9);
+    let thr_in = (p90_in * 0.3) as usize;
+    let active = |s: i64, n: usize| n >= thr && per_sec_in.get(&s).copied().unwrap_or(0) >= thr_in;
     let mut out: Vec<(i64, i64)> = Vec::new();
-    for (&s, _) in per_sec.iter().filter(|(_, n)| **n >= thr) {
+    for (&s, _) in per_sec.iter().filter(|(s, n)| active(**s, **n)) {
         match out.last_mut() {
             Some(last) if s * 1_000_000 - last.1 <= 3_000_000 => last.1 = (s + 1) * 1_000_000,
             _ => out.push((s * 1_000_000, (s + 1) * 1_000_000)),
@@ -543,7 +596,7 @@ pub fn match_phases(outbound: &[i64]) -> Vec<(i64, i64)> {
     }
     out.retain(|&(a, b)| b - a >= 20_000_000);
     // Everything was "match": phases carry no information.
-    if out.len() == 1 && per_sec.values().filter(|&&n| n < thr).count() < 5 {
+    if out.len() == 1 && per_sec.iter().filter(|(s, n)| !active(**s, **n)).count() < 5 {
         return vec![];
     }
     out
@@ -753,10 +806,11 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
     let wifi = near(an, &[Kind::WifiScan, Kind::WifiRoam, Kind::WifiDisconnect, Kind::WifiQualityDrop, Kind::WifiRetries], None, a, b);
     let traffic = biggest(&[Kind::TrafficBurst], None);
     let dpc = biggest(&[Kind::DpcSpike], None);
+    let drv = biggest(&[Kind::DriverLatency], None);
     let gpu = biggest(&[Kind::GpuLimit, Kind::Paging], None);
 
     let mut ev: Vec<String> = Vec::new();
-    for x in [&in_gap, &out_gap, &frame, &stall, &gw, &hop2, &inet, &server, &traffic, &dpc, &gpu].into_iter().flatten() {
+    for x in [&in_gap, &out_gap, &frame, &stall, &gw, &hop2, &inet, &server, &traffic, &dpc, &drv, &gpu].into_iter().flatten() {
         ev.push(format!("{:+.1}s {}: {}", (x.t - t) as f64 / 1e6, x.kind.label(), x.detail));
     }
     for w in wifi.iter().take(4) {
@@ -770,12 +824,14 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
         _ => false,
     };
     let (culprit, category, confidence): (String, &'static str, &'static str) = if frame_ms >= 80.0 && gap_ms < 80.0 {
-        let why = if stall.is_some() {
-            "a whole-system stall (driver / DPC / firmware) froze the PC"
+        let why = if let Some(x) = drv.as_ref().filter(|x| x.value >= 2.0) {
+            format!("a driver held up a CPU core: {}", x.detail)
+        } else if stall.is_some() {
+            "a whole-system stall (driver / DPC / firmware) froze the PC".to_string()
         } else if gpu.is_some() {
-            "frame hitch with GPU limit / paging at the same time"
+            "frame hitch with GPU limit / paging at the same time".to_string()
         } else {
-            "the game itself hitched (shader compile, asset streaming, CPU spike)"
+            "the game itself hitched (shader compile, asset streaming, CPU spike)".to_string()
         };
         (format!("Local PC: {why}"), "local", if frame_ms >= 150.0 { "high" } else { "medium" })
     } else if gap_ms >= 80.0 || gw.is_some() || server.is_some() || inet.is_some() || hop2.is_some() {
@@ -811,14 +867,16 @@ pub fn analyze(d: &Data) -> Analysis {
     let mut res = Analysis::default();
 
     // Game stream.
+    let profile = crate::profile::of_session(&d.meta);
+    let min_gap = (profile.min_gap_ms * 1000.0) as i64;
     let servers = server_endpoints(d);
     let inbound: Vec<i64> = d.packets.iter().filter(|p| p.udp && !p.send && servers.contains(&p.ep)).map(|p| p.t).collect();
     let outbound: Vec<i64> = d.packets.iter().filter(|p| p.udp && p.send && servers.contains(&p.ep)).map(|p| p.t).collect();
-    res.phases = match_phases(&outbound);
+    res.phases = if profile.match_detection == crate::profile::MatchDetection::SendRate { match_phases(&outbound, &inbound) } else { vec![] };
     let phases = res.phases.clone();
     if inbound.len() > 50 {
-        let (med_in, mut gaps_in, normal_in) = stream_gaps(&inbound, Kind::InGap, "server");
-        let (med_out, mut gaps_out, _) = stream_gaps(&outbound, Kind::OutGap, "client");
+        let (med_in, mut gaps_in, normal_in) = stream_gaps(&inbound, Kind::InGap, "server", min_gap);
+        let (med_out, mut gaps_out, _) = stream_gaps(&outbound, Kind::OutGap, "client", min_gap);
         for g in gaps_in.iter_mut().chain(gaps_out.iter_mut()) {
             g.in_match = in_phases(&phases, g.t);
         }
@@ -828,7 +886,7 @@ pub fn analyze(d: &Data) -> Analysis {
         // Large updates arrive as several packets within a few ms: count them as one tick.
         let mut ticks: Vec<i64> = Vec::new();
         for &t in &inbound {
-            if ticks.last().is_none_or(|&l| t - l >= 5_000) {
+            if ticks.last().is_none_or(|&l| t - l >= (profile.tick_merge_ms * 1000.0) as i64) {
                 ticks.push(t);
             }
         }
@@ -890,6 +948,9 @@ pub fn analyze(d: &Data) -> Analysis {
     res.wifi_counters_bogus = wifi_counters_bogus(d);
     wifi_anomalies(d, res.wifi_counters_bogus, &mut an);
     system_anomalies(d, &mut an);
+    if !d.events.iter().any(|e| e.kind == "exp") {
+        driver_anomalies(d, &mut an);
+    }
     an.sort_by_key(|a| (a.t, a.kind));
 
     // Correlations for noticeable game stalls.
@@ -902,6 +963,9 @@ pub fn analyze(d: &Data) -> Analysis {
         c.insert("server-path spike/loss".into(), corr(&an, &gaps, PROBE, Some("server"), 300_000, 300_000));
         c.insert("frame hitch".into(), corr(&an, &gaps, &[Kind::FrameHitch], None, 200_000, 200_000));
         c.insert("system stall".into(), corr(&an, &gaps, &[Kind::Stall], None, 200_000, 200_000));
+        if !d.driver_1s.is_empty() {
+            c.insert("driver DPC/ISR ≥1 ms".into(), corr(&an, &gaps, &[Kind::DriverLatency], None, 500_000, 200_000));
+        }
         c.insert("Wi-Fi scan/roam/drop (±3 s)".into(), corr(&an, &gaps, &[Kind::WifiScan, Kind::WifiRoam, Kind::WifiDisconnect, Kind::WifiQualityDrop], None, 3_000_000, 1_000_000));
         c.insert("other traffic burst".into(), corr(&an, &gaps, &[Kind::TrafficBurst], None, 2_000_000, 1_000_000));
         if an.iter().any(|a| a.kind == Kind::GameBurst) {
@@ -915,6 +979,9 @@ pub fn analyze(d: &Data) -> Analysis {
         c.insert("Wi-Fi scan/roam/drop (±3 s)".into(), corr(&an, &gw_spikes, &[Kind::WifiScan, Kind::WifiRoam, Kind::WifiDisconnect, Kind::WifiQualityDrop], None, 3_000_000, 1_000_000));
         c.insert("other traffic burst".into(), corr(&an, &gw_spikes, &[Kind::TrafficBurst], None, 2_000_000, 1_000_000));
         c.insert("system stall / DPC".into(), corr(&an, &gw_spikes, &[Kind::Stall, Kind::DpcSpike], None, 300_000, 300_000));
+        if !d.driver_1s.is_empty() {
+            c.insert("driver DPC/ISR ≥1 ms".into(), corr(&an, &gw_spikes, &[Kind::DriverLatency], None, 300_000, 300_000));
+        }
         c.insert("game inbound gap".into(), corr(&an, &gw_spikes, &[Kind::InGap], None, 300_000, 300_000));
         if an.iter().any(|a| a.kind == Kind::GameBurst) {
             c.insert("game region-ping burst (≤1 s before)".into(), corr(&an, &gw_spikes, &[Kind::GameBurst], None, 1_000_000, 200_000));

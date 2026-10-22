@@ -178,6 +178,10 @@ pub struct Data {
     /// Commands Windows sent to the network drivers (NDIS OID requests, power requests):
     /// (t, what, pid).
     pub driver_cmds: Vec<(i64, String, u32)>,
+    /// Long driver DPC/ISR runs: (start t, is ISR, driver, duration us).
+    pub driver_long: Vec<(i64, bool, String, f64)>,
+    /// Worst DPC/ISR run per second over all drivers: (t, us).
+    pub driver_1s: Vec<(i64, f64)>,
     pub etw_lost: u64,
     pub files: Vec<String>,
 }
@@ -400,7 +404,22 @@ pub fn load(dir: &Path) -> Result<Data> {
         }
     })?;
     seen("wifi_driver", present, &mut files);
-    for name in ["etw_health", "etw_health_frames", "etw_health_wlan", "etw_health_ndis"] {
+    let present = each(dir, "driver_long", |r| {
+        if let (Some(t), Some(us)) = (r.i("t_us"), r.f("dur_us")) {
+            d.driver_long.push((t, r.s("kind") == "I", r.s("driver").to_string(), us));
+        }
+    })?;
+    seen("driver_long", present, &mut files);
+    let present = each(dir, "drivers_1s", |r| {
+        if r.s("driver") == "_all" {
+            if let Some(t) = r.i("t_us") {
+                let m = r.f("dpc_max_us").unwrap_or(0.0).max(r.f("isr_max_us").unwrap_or(0.0));
+                d.driver_1s.push((t, m));
+            }
+        }
+    })?;
+    seen("drivers_1s", present, &mut files);
+    for name in ["etw_health", "etw_health_frames", "etw_health_wlan", "etw_health_ndis", "etw_health_kernel"] {
         let mut lost = 0u64;
         each(dir, name, |r| lost = lost.max(r.i("events_lost").unwrap_or(0) as u64))?;
         d.etw_lost += lost;

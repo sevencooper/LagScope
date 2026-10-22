@@ -16,6 +16,11 @@ use crate::analyze::findings::ROUTER_STEPS;
 use crate::app::{App, Config};
 use crate::ui::{BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW};
 
+/// Like println!, but through the shared log (console or GUI).
+macro_rules! say {
+    ($($a:tt)*) => { crate::ui::log(format!($($a)*)) };
+}
+
 #[derive(Default)]
 struct CheckState {
     windows: Vec<Window>,
@@ -34,38 +39,37 @@ enum Step {
 pub fn report_restored(r: Vec<(String, Result<()>)>) {
     for (what, res) in r {
         match res {
-            Ok(()) => println!("{GREEN}Restored from an earlier, interrupted check: {what}{RESET}"),
-            Err(e) => println!("{RED}Could not restore '{what}': {e:#}{RESET}"),
+            Ok(()) => say!("{GREEN}Restored from an earlier, interrupted check: {what}{RESET}"),
+            Err(e) => say!("{RED}Could not restore '{what}': {e:#}{RESET}"),
         }
     }
 }
 
 fn wait_key_exit() {
-    println!("\nPress any key to close this window.");
+    say!("\nPress any key to close this window.");
     console::wait_key();
 }
 
-pub fn run(mut cfg: Config) -> Result<()> {
-    console::setup();
+/// Everything before recording starts: inventory, driver step, consent. Returns the
+/// recording config and hooks, or None if there is nothing to record.
+pub fn prepare(mut cfg: Config) -> Result<Option<(Config, capture::Hooks)>> {
     let secs = cfg.wifi_check.unwrap_or(60).max(10);
-    println!("{BOLD}LagScope {} - Wi-Fi check & fix{RESET}\n", env!("CARGO_PKG_VERSION"));
+    say!("{BOLD}LagScope {} - Wi-Fi check & fix{RESET}\n", env!("CARGO_PKG_VERSION"));
     report_restored(fixes::restore_pending());
 
     let Some(route) = probes::route_to(Ipv4Addr::new(1, 1, 1, 1)) else {
-        println!("{RED}This PC has no internet connection right now. Connect to your Wi-Fi and try again.{RESET}");
-        wait_key_exit();
-        return Ok(());
+        say!("{RED}This PC has no internet connection right now. Connect to your Wi-Fi and try again.{RESET}");
+        return Ok(None);
     };
     if !route.is_wifi {
-        println!("This PC is connected through '{}' ({}), not Wi-Fi, so there is nothing to check here.", route.adapter, route.description);
-        wait_key_exit();
-        return Ok(());
+        say!("This PC is connected through '{}' ({}), not Wi-Fi, so there is nothing to check here.", route.adapter, route.description);
+        return Ok(None);
     }
-    println!("Reading the Wi-Fi settings of '{}' ...", route.adapter);
+    say!("Reading the Wi-Fi settings of '{}' ...", route.adapter);
     let inv = match fixes::inventory(&route.adapter) {
         Ok(i) => i,
         Err(e) => {
-            println!("{YELLOW}Could not read the adapter settings ({e:#}); the check will only measure, not test changes.{RESET}");
+            say!("{YELLOW}Could not read the adapter settings ({e:#}); the check will only measure, not test changes.{RESET}");
             Inventory { adapter: route.adapter.clone(), description: route.description.clone(), ..Default::default() }
         }
     };
@@ -73,27 +77,26 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
     let mut driver_log = Vec::new();
     if !cfg.unattended && driver_step(&inv, &mut driver_log) {
-        wait_key_exit();
-        return Ok(());
+        return Ok(None);
     }
 
     let plan = fixes::plan(&inv);
     let mut allowed = Vec::new();
     if plan.is_empty() {
-        println!("\nThere are no settings to test on this PC; the check will measure the Wi-Fi link only.");
+        say!("\nThere are no settings to test on this PC; the check will measure the Wi-Fi link only.");
     } else {
         let mins = (secs * 2 + secs * 3 / 4 + secs * 3 / 2 + plan.len() as u64 * (secs + 20)) / 60 + 1;
-        println!("\n{BOLD}The check takes about {mins} minutes.{RESET} It measures your Wi-Fi with nothing changed, then tests these one at a time");
-        println!("(each for {secs} s, then put back exactly as it was):");
+        say!("\n{BOLD}The check takes about {mins} minutes.{RESET} It measures your Wi-Fi with nothing changed, then tests these one at a time");
+        say!("(each for {secs} s, then put back exactly as it was):");
         for e in &plan {
-            println!("  - {}", e.label);
+            say!("  - {}", e.label);
         }
-        println!("{DIM}Wi-Fi drops for a few seconds when an adapter setting is changed. Bluetooth devices disconnect during the Bluetooth test.{RESET}");
-        println!("Close THE FINALS and anything that streams or downloads, and do not use the PC until the check is done.");
+        say!("{DIM}Wi-Fi drops for a few seconds when an adapter setting is changed. Bluetooth devices disconnect during the Bluetooth test.{RESET}");
+        say!("Close your games and anything that streams or downloads, and do not use the PC until the check is done.");
         if cfg.unattended || console::ask_yes_no("\nAllow these temporary changes?", true) {
             allowed = plan;
         } else {
-            println!("OK - measuring only, nothing will be changed.");
+            say!("OK - measuring only, nothing will be changed.");
         }
     }
 
@@ -115,25 +118,36 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }),
         after_stop: Box::new(move |app: &App| results(app, &plan2, &st2, unattended)),
     };
-    capture::run_with(cfg, Some(hooks))
+    Ok(Some((cfg, hooks)))
+}
+
+pub fn run(cfg: Config) -> Result<()> {
+    console::setup();
+    match prepare(cfg)? {
+        Some((cfg, hooks)) => capture::run_with(cfg, Some(hooks)),
+        None => {
+            wait_key_exit();
+            Ok(())
+        }
+    }
 }
 
 fn print_inventory(inv: &Inventory) {
-    println!("  Adapter:   {}", inv.description);
-    println!("  Driver:    {} ({})", if inv.driver_version.is_empty() { "?" } else { &inv.driver_version }, inv.driver_date);
+    say!("  Adapter:   {}", inv.description);
+    say!("  Driver:    {} ({})", if inv.driver_version.is_empty() { "?" } else { &inv.driver_version }, inv.driver_date);
     if !inv.band.is_empty() {
-        println!("  Connected: {} band", inv.band);
+        say!("  Connected: {} band", inv.band);
     }
     for p in inv.adv.iter().filter(|p| {
         let d = p.display.to_ascii_lowercase();
         ["roam", "band", "power", "throughput", "bandwidth", "mlo", "multi-link"].iter().any(|w| d.contains(w))
     }) {
-        println!("  {:<26} {}", p.display, p.value);
+        say!("  {:<26} {}", p.display, p.value);
     }
     if !inv.selective_suspend.is_empty() {
-        println!("  {:<26} {}", "Selective suspend", inv.selective_suspend);
+        say!("  {:<26} {}", "Selective suspend", inv.selective_suspend);
     }
-    println!("  Bluetooth: {}   Location services: {}   Windows Wi-Fi auto-config: {}", if inv.bluetooth.is_empty() { "none".into() } else { inv.bluetooth.join(", ") }, inv.location, if inv.autoconfig { "on" } else { "off" });
+    say!("  Bluetooth: {}   Location services: {}   Windows Wi-Fi auto-config: {}", if inv.bluetooth.is_empty() { "none".into() } else { inv.bluetooth.join(", ") }, inv.location, if inv.autoconfig { "on" } else { "off" });
 }
 
 /// Driver version check and optional update through Windows Update. Returns true if the
@@ -142,55 +156,55 @@ fn driver_step(inv: &Inventory, log: &mut Vec<String>) -> bool {
     let known = fixes::KNOWN_DRIVERS.iter().find(|k| inv.description.contains(k.0));
     let outdated = known.filter(|k| !inv.driver_version.is_empty() && fixes::version_lt(&inv.driver_version, k.1));
     match (known, outdated) {
-        (_, Some(k)) => println!("\n{YELLOW}Your Wi-Fi driver {} is older than the newest known one ({}, {}).{RESET}", inv.driver_version, k.1, k.2),
-        (Some(k), None) => println!("\n{GREEN}Your Wi-Fi driver is up to date (newest known: {}).{RESET}", k.1),
+        (_, Some(k)) => say!("\n{YELLOW}Your Wi-Fi driver {} is older than the newest known one ({}, {}).{RESET}", inv.driver_version, k.1, k.2),
+        (Some(k), None) => say!("\n{GREEN}Your Wi-Fi driver is up to date (newest known: {}).{RESET}", k.1),
         _ => {}
     }
     if !console::ask_yes_no("\nCheck Windows Update for newer Wi-Fi / Bluetooth drivers? (takes a minute or two)", true) {
         log.push("Windows Update search skipped by user".into());
         return false;
     }
-    println!("Searching Windows Update ...");
+    say!("Searching Windows Update ...");
     match fixes::search_driver_updates() {
         Ok(list) if !list.is_empty() => {
             log.push(format!("Windows Update offers: {}", list.iter().map(|u| u.title.as_str()).collect::<Vec<_>>().join("; ")));
-            println!("Windows Update offers:");
+            say!("Windows Update offers:");
             for u in &list {
-                println!("  - {} {DIM}({} {}){RESET}", u.title, u.class, u.date);
+                say!("  - {} {DIM}({} {}){RESET}", u.title, u.class, u.date);
             }
             if console::ask_yes_no("Install these now?", true) {
-                println!("Downloading and installing (Wi-Fi may drop for a moment) ...");
+                say!("Downloading and installing (Wi-Fi may drop for a moment) ...");
                 let ids: Vec<String> = list.iter().map(|u| u.id.clone()).collect();
                 let r = fixes::install_driver_updates(&ids);
                 log.push(format!("install: {r:?}"));
                 match r {
                     Ok(true) => {
-                        println!("{GREEN}{BOLD}Installed. Restart the PC now, then run LagScope again and choose 1 (Wi-Fi check).{RESET}");
+                        say!("{GREEN}{BOLD}Installed. Restart the PC now, then run the Wi-Fi check again.{RESET}");
                         return true;
                     }
                     Ok(false) => {
-                        println!("{GREEN}Installed.{RESET} Waiting 20 s for Wi-Fi to reconnect ...");
+                        say!("{GREEN}Installed.{RESET} Waiting 20 s for Wi-Fi to reconnect ...");
                         std::thread::sleep(Duration::from_secs(20));
                     }
-                    Err(e) => println!("{RED}Install failed: {e:#}{RESET}"),
+                    Err(e) => say!("{RED}Install failed: {e:#}{RESET}"),
                 }
             }
         }
         Ok(_) => {
             log.push("Windows Update: no newer network/Bluetooth drivers".into());
-            println!("Windows Update has no newer network or Bluetooth drivers for this PC.");
+            say!("Windows Update has no newer network or Bluetooth drivers for this PC.");
             if let Some(k) = outdated {
-                println!("{YELLOW}To install {} by hand:{RESET}", k.1);
-                println!("  1. Open https://www.catalog.update.microsoft.com and search for \"{}\".", k.0);
-                println!("  2. Download \"... Net Driver Update ({})\" for your Windows version (a .cab file).", k.1);
-                println!("  3. Open the .cab, select all files, drag them into a new folder.");
-                println!("  4. Device Manager > Network adapters > right-click the {} adapter > Update driver >", k.0);
-                println!("     Browse my computer > choose that folder. Restart, then run this check again.");
+                say!("{YELLOW}To install {} by hand:{RESET}", k.1);
+                say!("  1. Open https://www.catalog.update.microsoft.com and search for \"{}\".", k.0);
+                say!("  2. Download \"... Net Driver Update ({})\" for your Windows version (a .cab file).", k.1);
+                say!("  3. Open the .cab, select all files, drag them into a new folder.");
+                say!("  4. Device Manager > Network adapters > right-click the {} adapter > Update driver >", k.0);
+                say!("     Browse my computer > choose that folder. Restart, then run this check again.");
             }
         }
         Err(e) => {
             log.push(format!("Windows Update search failed: {e:#}"));
-            println!("{YELLOW}Windows Update search failed: {e:#}{RESET}");
+            say!("{YELLOW}Windows Update search failed: {e:#}{RESET}");
         }
     }
     false
@@ -335,7 +349,7 @@ fn results(app: &App, plan: &[Experiment], st: &Mutex<CheckState>, unattended: b
     let st = st.lock().unwrap();
     let samples = app.gw_samples.lock().unwrap().clone();
     let o = experiments::evaluate(&samples, &st.windows);
-    println!("\n{BOLD}Wi-Fi check results{RESET} {DIM}(freeze = router ping above {:.0} ms or lost){RESET}", o.threshold_ms);
+    say!("\n{BOLD}Wi-Fi check results{RESET} {DIM}(freeze = router ping above {:.0} ms or lost){RESET}", o.threshold_ms);
     for w in &o.windows {
         let tag = if o.fixes.contains(&w.key) {
             format!("  {GREEN}{BOLD}<- fixed{RESET}")
@@ -344,60 +358,60 @@ fn results(app: &App, plan: &[Experiment], st: &Mutex<CheckState>, unattended: b
         } else {
             String::new()
         };
-        println!("  {:<46} {:>3} freezes in {:>3.0} s  ({:>4.1}/min){tag}", w.label, w.spikes, w.secs, w.per_min);
+        say!("  {:<46} {:>3} freezes in {:>3.0} s  ({:>4.1}/min){tag}", w.label, w.spikes, w.secs, w.per_min);
     }
     if let Some(b) = &st.band_after {
-        println!("  {DIM}(during the band test the PC was connected on: {}){RESET}", if b.is_empty() { "?" } else { b });
+        say!("  {DIM}(during the band test the PC was connected on: {}){RESET}", if b.is_empty() { "?" } else { b });
     }
     for (k, e) in &st.failed {
-        println!("  {RED}{k}: could not be changed ({e}){RESET}");
+        say!("  {RED}{k}: could not be changed ({e}){RESET}");
     }
-    println!();
+    say!("");
     for s in &o.summary {
-        println!("{s}");
+        say!("{s}");
     }
-    let finals = "Next: choose 2 in the LagScope menu and play a match or two, pressing F8 at every hiccup.";
+    let finals = "Next: record a match or two (Record), pressing F8 at every hiccup.";
     if st.skipped_no_problem || !o.problem {
-        println!("\n{GREEN}{BOLD}No regular Wi-Fi freezes right now.{RESET}");
+        say!("\n{GREEN}{BOLD}No regular Wi-Fi freezes right now.{RESET}");
         if app.game_pid.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-            println!("{YELLOW}The freeze may only happen while the game is running: start THE FINALS, stay in the main menu,");
-            println!("and run this check again (option 1). If that is clean too:{RESET} {finals}");
+            say!("{YELLOW}The freeze may only happen while a game is running: start your game, stay in its main menu,");
+            say!("and run this check again. If that is clean too:{RESET} {finals}");
         } else {
-            println!("{finals}");
+            say!("{finals}");
         }
         app.session.event("exp_result", "no problem found");
         return;
     }
     if let Some(e) = plan.iter().find(|e| o.fixes.iter().any(|k| k == e.key)) {
-        println!("\n{GREEN}{BOLD}Fix found: {}{RESET}", e.label);
+        say!("\n{GREEN}{BOLD}Fix found: {}{RESET}", e.label);
         if !e.keep_note.is_empty() {
-            println!("{YELLOW}{}{RESET}", e.keep_note);
+            say!("{YELLOW}{}{RESET}", e.keep_note);
         }
         if !unattended && console::ask_yes_no("Keep this change permanently? (you can undo it later from the LagScope menu)", true) {
             match fixes::keep(&e.change) {
                 Ok(()) => {
-                    println!("{GREEN}Done: {}{RESET}", e.change.describe());
+                    say!("{GREEN}Done: {}{RESET}", e.change.describe());
                     app.session.event("exp_result", format!("fix kept: {} ({})", e.key, e.change.describe()));
                     if e.change.restarts_adapter() {
-                        println!("Waiting for Wi-Fi to reconnect ...");
+                        say!("Waiting for Wi-Fi to reconnect ...");
                         wait_reconnect_blocking();
                     }
                 }
                 Err(err) => {
-                    println!("{RED}Could not apply it: {err:#}{RESET}");
+                    say!("{RED}Could not apply it: {err:#}{RESET}");
                     app.session.event("exp_result", format!("keeping {} failed: {err:#}", e.key));
                 }
             }
         } else {
             app.session.event("exp_result", format!("fix found but not kept: {}", e.key));
         }
-        println!("{finals}");
+        say!("{finals}");
     } else if o.partial.is_empty() {
-        println!("\n{YELLOW}{BOLD}The PC is not the cause.{RESET} {ROUTER_STEPS}");
-        println!("After changing the router, run this check again (option 1) to see whether the freezes are gone.");
+        say!("\n{YELLOW}{BOLD}The PC is not the cause.{RESET} {ROUTER_STEPS}");
+        say!("After changing the router, run this check again to see whether the freezes are gone.");
         app.session.event("exp_result", "no PC-side change helped: router");
     } else {
-        println!("\n{YELLOW}Some changes reduced the freezes but none removed them.{RESET} {ROUTER_STEPS}");
+        say!("\n{YELLOW}Some changes reduced the freezes but none removed them.{RESET} {ROUTER_STEPS}");
         app.session.event("exp_result", "only partial improvements");
     }
 }

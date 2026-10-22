@@ -378,7 +378,7 @@ pub fn plan(inv: &Inventory) -> Vec<Experiment> {
         v.push(Experiment {
             key: "autoconfig",
             label: "Windows Wi-Fi background scanning off".into(),
-            keep_note: "Windows will no longer search for networks or connect on its own. After a restart you may have to connect manually, and other Wi-Fi networks will not show up - use LagScope's Undo (menu option 3) to turn it back on.",
+            keep_note: "Windows will no longer search for networks or connect on its own. After a restart you may have to connect manually, and other Wi-Fi networks will not show up - use LagScope's Undo to turn it back on.",
             change: Change::Autoconfig { iface: a.clone() },
         });
     }

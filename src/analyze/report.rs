@@ -129,6 +129,13 @@ fn series(d: &Data, a: &Analysis) -> Value {
         }
     }
 
+    let mut drv = empty();
+    for &(ts, us) in &d.driver_1s {
+        max_into(&mut drv, b.idx(ts + 500_000), us / 1000.0);
+    }
+    for (ts, _, _, us) in &d.driver_long {
+        max_into(&mut drv, b.idx(*ts), us / 1000.0);
+    }
     let mut stall = empty();
     for &(ts, m) in &d.stall_1s {
         max_into(&mut stall, b.idx(ts + 500_000), m as f64 / 1000.0);
@@ -189,7 +196,7 @@ fn series(d: &Data, a: &Analysis) -> Value {
         "frame": round(frame, 1),
         "probes": probes, "loss": loss,
         "quality": round(quality, 0), "rssi": round(rssi, 0), "tx_rate": round(rate, 0),
-        "stall": round(stall, 1), "dpc": round(dpc, 2), "cpu": round(cpu, 0), "maxcore": round(maxcore, 0),
+        "stall": round(stall, 1), "driver": round(drv, 2), "dpc": round(dpc, 2), "cpu": round(cpu, 0), "maxcore": round(maxcore, 0),
         "gpu": round(gpu, 0), "gpu_power": round(gpupow, 0), "other_mbit": round(other, 2),
     })
 }
@@ -227,6 +234,7 @@ pub fn render(d: &Data, a: &Analysis) -> String {
         "beacons": a.beacons.iter().take(10).collect::<Vec<_>>(),
         "marks": d.marks.iter().map(|m| *m as f64 / 1e6).collect::<Vec<_>>(),
         "wifi_check": a.wifi_check,
+        "driver_latency": d.meta["driver_latency"],
     });
     // Escape "</" so embedded strings cannot terminate the script tag.
     let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");

@@ -54,6 +54,9 @@ impl<'a> Event<'a> {
     pub fn provider(&self) -> GUID {
         self.rec.EventHeader.ProviderId
     }
+    pub fn cpu(&self) -> u8 {
+        unsafe { self.rec.BufferContext.Anonymous.Anonymous.ProcessorNumber }
+    }
     pub fn data(&self) -> &'a [u8] {
         if self.rec.UserData.is_null() || self.rec.UserDataLength == 0 {
             return &[];
@@ -383,24 +386,37 @@ pub fn stop_by_name(name: &str) {
     }
 }
 
+/// Kernel ("classic") event groups for `RealtimeSession::start_kernel`.
+pub const KERNEL_FLAG_IMAGE_LOAD: u32 = EVENT_TRACE_FLAG_IMAGE_LOAD;
+pub const KERNEL_FLAG_DPC: u32 = EVENT_TRACE_FLAG_DPC;
+pub const KERNEL_FLAG_INTERRUPT: u32 = EVENT_TRACE_FLAG_INTERRUPT;
+
 impl RealtimeSession {
+    /// A private kernel session (system logger mode, Windows 8+) delivering the kernel
+    /// event groups in `flags` (DPC/ISR timings, image loads, ...). Several of these can
+    /// run at once, unlike the single global "NT Kernel Logger".
+    pub fn start_kernel(name: &str, flags: u32, cb: impl FnMut(&Event) + Send + 'static) -> Result<Self> {
+        let wname = wide(name);
+        let make = || {
+            let mut p = new_props(&wname);
+            unsafe {
+                let pr = &mut *(p.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                pr.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
+                pr.EnableFlags = flags;
+                // Kernel events can be very frequent: more and bigger buffers.
+                pr.BufferSize = 256;
+                pr.MinimumBuffers = 32;
+                pr.MaximumBuffers = 256;
+            }
+            p
+        };
+        let (handle, props) = start_session(name, &wname, make)?;
+        Self::consume(name, wname, props, handle, Vec::new(), cb)
+    }
+
     pub fn start(name: &str, providers: &[ProviderSpec], cb: impl FnMut(&Event) + Send + 'static) -> Result<Self> {
         let wname = wide(name);
-        stop_by_name(name);
-        let mut props = new_props(&wname);
-        let mut handle = CONTROLTRACE_HANDLE { Value: 0 };
-        let mut r = unsafe { StartTraceW(&mut handle, wname.as_ptr(), props.as_mut_ptr() as *mut _) };
-        if r == ERROR_ALREADY_EXISTS {
-            stop_by_name(name);
-            props = new_props(&wname);
-            r = unsafe { StartTraceW(&mut handle, wname.as_ptr(), props.as_mut_ptr() as *mut _) };
-        }
-        if r != ERROR_SUCCESS {
-            if r == 5 {
-                bail!("StartTrace({name}) access denied - run as Administrator");
-            }
-            bail!("StartTrace({name}) failed: error {r}");
-        }
+        let (handle, props) = start_session(name, &wname, || new_props(&wname))?;
 
         let mut filtered = Vec::new();
         for p in providers {
@@ -419,6 +435,17 @@ impl RealtimeSession {
             filtered.push((p.name, ok));
         }
 
+        Self::consume(name, wname, props, handle, filtered, cb)
+    }
+
+    fn consume(
+        name: &str,
+        wname: Vec<u16>,
+        props: Vec<u64>,
+        handle: CONTROLTRACE_HANDLE,
+        filtered: Vec<(&'static str, bool)>,
+        cb: impl FnMut(&Event) + Send + 'static,
+    ) -> Result<Self> {
         let ctx = Box::into_raw(Box::new(Ctx { cb: Box::new(cb) }));
         let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { std::mem::zeroed() };
         logfile.LoggerName = wname.as_ptr() as *mut u16;
@@ -471,6 +498,26 @@ impl RealtimeSession {
         unsafe { drop(Box::from_raw(self.ctx)) };
         self.ctx = std::ptr::null_mut();
     }
+}
+
+/// StartTrace with one retry after stopping a leftover session of the same name.
+fn start_session(name: &str, wname: &[u16], make: impl Fn() -> Vec<u64>) -> Result<(CONTROLTRACE_HANDLE, Vec<u64>)> {
+    stop_by_name(name);
+    let mut props = make();
+    let mut handle = CONTROLTRACE_HANDLE { Value: 0 };
+    let mut r = unsafe { StartTraceW(&mut handle, wname.as_ptr(), props.as_mut_ptr() as *mut _) };
+    if r == ERROR_ALREADY_EXISTS {
+        stop_by_name(name);
+        props = make();
+        r = unsafe { StartTraceW(&mut handle, wname.as_ptr(), props.as_mut_ptr() as *mut _) };
+    }
+    if r != ERROR_SUCCESS {
+        if r == 5 {
+            bail!("StartTrace({name}) access denied - run as Administrator");
+        }
+        bail!("StartTrace({name}) failed: error {r}");
+    }
+    Ok((handle, props))
 }
 
 impl Drop for RealtimeSession {

@@ -83,6 +83,12 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   </div>
   <div class="charts" id="charts"></div>
 
+  <div id="drvwrap" hidden>
+  <h2>Drivers</h2>
+  <div class="sub">Longest DPC / interrupt-handler run per driver. Under 0.5 ms is fine, 1-2 ms can cause small hitches, over 2 ms delays packets, frames and audio. Graphics drivers routinely reach 1-2 ms while gaming; they are judged from 2 ms.</div>
+  <div class="card tablewrap"><table id="drv"><thead><tr><th>driver</th><th>longest DPC</th><th>longest ISR</th><th>DPC count</th><th>total DPC+ISR time</th><th>runs ≥1 ms</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
   <h2>All detected events</h2>
   <div class="card tablewrap"><table id="anoms"><thead><tr><th>time</th><th>event</th><th>value</th><th>detail</th></tr></thead><tbody></tbody></table></div>
   <h2>Session log</h2>
@@ -98,7 +104,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&l
 const fmtT = (s) => { const ds = Math.round(Math.max(0, s) * 10); const h = Math.floor(ds/36000), m = Math.floor(ds/600)%60, x = ((ds%600)/10).toFixed(1).padStart(4,"0"); return (h? h+":" : "") + String(m).padStart(2,"0") + ":" + x; };
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
-$("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${(D.meta.config && D.meta.config.processes || []).join(", ")}`;
+$("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${D.meta.wifi_check_plan ? "none (Wi-Fi check)" : (D.meta.profile && !(D.meta.profile.processes || []).length ? ((D.meta.detected_games || []).join(", ") || "auto-detect (no game found)") : ((D.meta.profile && D.meta.profile.name) || (D.meta.config && D.meta.config.processes || []).join(", ")))}`;
 $("headline").textContent = D.headline;
 
 const tiles = [];
@@ -125,6 +131,17 @@ if (D.wifi_check) {
     const vs = w.change_pct == null ? "" : (w.change_pct > 0 ? "+" : "") + w.change_pct.toFixed(0) + "%";
     return `<tr><td>${esc(w.label)}${esc(tag)}</td><td>${w.secs.toFixed(0)} s</td><td>${w.spikes}</td><td>${w.per_min.toFixed(1)}</td><td>${vs}</td><td>${w.p50_ms.toFixed(1)} / ${w.p99_ms.toFixed(0)} / ${w.max_ms.toFixed(0)} ms</td><td>${w.lost}</td></tr>`;
   }).join("");
+}
+
+if (D.driver_latency && D.driver_latency.drivers && D.driver_latency.drivers.length) {
+  $("drvwrap").hidden = false;
+  const ms = (us) => (us / 1000).toFixed(2) + " ms";
+  const over1 = (h) => (h || []).slice(5).reduce((a, b) => a + b, 0);
+  $("drv").querySelector("tbody").innerHTML = D.driver_latency.drivers.slice(0, 15).map(r =>
+    `<tr><td>${esc(r.driver)}</td><td>${ms(r.dpc_max_us)}</td><td>${r.isr_n ? ms(r.isr_max_us) : "-"}</td><td>${r.dpc_n}</td><td>${(r.dpc_total_ms + r.isr_total_ms).toFixed(0)} ms</td><td>${over1(r.hist_dpc) + over1(r.hist_isr)}</td></tr>`).join("");
+  const w = D.driver_latency.drivers[0];
+  tiles.push(["Worst driver run", (Math.max(w.dpc_max_us, w.isr_max_us) / 1000).toFixed(2) + " ms (" + w.driver + ")"]);
+  $("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
 }
 
 $("marks").innerHTML = D.verdicts.map(v => `
@@ -199,6 +216,9 @@ chart("Wi-Fi", [
   { label: "RSSI dBm", data: S.rssi, color: C(2) },
   { label: "TX rate Mbit/s", data: S.tx_rate, color: C(3) },
 ]);
+if (S.driver && S.driver.some(v => v != null)) chart("Driver latency: longest DPC/interrupt run (ms)", [
+  { label: "worst driver run", data: S.driver, color: C(5), unit: " ms", span: true },
+], { unit: "ms", y: { range: (u, mn, mx) => [0, Math.max(1, mx)] } });
 chart("System stalls & CPU", [
   { label: "stall max ms", data: S.stall, color: css("--bad"), unit: " ms" },
   { label: "DPC+IRQ %", data: S.dpc, color: C(5), unit: "%" },

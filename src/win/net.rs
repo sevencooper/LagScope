@@ -140,7 +140,8 @@ impl NetState {
     }
 
     fn pick_server(&mut self) {
-        let best = self.endpoint_counts.drain().max_by_key(|(_, n)| *n);
+        let ignore = &self.app.cfg.profile.ignore_ports;
+        let best = self.endpoint_counts.drain().filter(|(ep, _)| !ignore.contains(&ep.port())).max_by_key(|(_, n)| *n);
         if let Some((ep, n)) = best {
             // ~10 packets/s minimum: a real-time game stream, not a lobby/voice trickle.
             if n >= 30 && Some(ep) != self.server {

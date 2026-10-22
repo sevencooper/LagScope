@@ -32,24 +32,47 @@ fn default_out_dir() -> PathBuf {
 /// collectors (and stopped before them), and a step run after recording stops but before
 /// the report is built.
 pub struct Hooks {
-    pub start: Box<dyn FnOnce(Arc<App>) -> Running>,
-    pub after_stop: Box<dyn FnOnce(&App)>,
+    pub start: Box<dyn FnOnce(Arc<App>) -> Running + Send>,
+    pub after_stop: Box<dyn FnOnce(&App) + Send>,
 }
 
-pub fn run(cfg: Config) -> Result<()> {
-    run_with(cfg, None)
+/// A running recording: all collectors started. Used by the console and the GUI.
+pub struct Capture {
+    pub app: Arc<App>,
+    pub marker: Arc<hotkey::Marker>,
+    running: Vec<Running>,
+    flusher: Option<std::thread::JoinHandle<()>>,
+    started: Instant,
+    cpu_at_start: f64,
+    after_stop: Option<Box<dyn FnOnce(&App) + Send>>,
 }
 
-pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
-    console::setup();
-    let base = cfg.out_dir.clone().unwrap_or_else(default_out_dir);
+/// What a finished recording produced.
+#[derive(Debug, Clone, Default)]
+pub struct Finished {
+    pub dir: PathBuf,
+    pub report: Option<PathBuf>,
+    pub zip: Option<PathBuf>,
+    pub headline: String,
+    /// Too short: nothing was kept.
+    pub discarded: bool,
+}
+
+pub fn default_out(cfg: &Config) -> PathBuf {
+    cfg.out_dir.clone().unwrap_or_else(default_out_dir)
+}
+
+/// Creates the session and starts every collector. `console_input`: read M/Q keys from the
+/// console window (console mode only).
+pub fn start(cfg: Config, hooks: Option<Hooks>, console_input: bool) -> Result<Capture> {
+    let base = default_out(&cfg);
     let session = Session::create(&base)?;
     let elevated = super::is_elevated();
-    println!("{BOLD}LagScope {}{RESET} - lag diagnostics recorder", env!("CARGO_PKG_VERSION"));
-    println!("Recording to {}", session.dir.display());
+    ui::log(format!("{BOLD}LagScope {}{RESET} - lag diagnostics recorder", env!("CARGO_PKG_VERSION")));
+    ui::log(format!("Recording to {}", session.dir.display()));
     if !elevated {
-        println!("{RED}Not running as Administrator: network and frame tracing will be unavailable.{RESET}");
-        println!("{RED}Right-click lagscope.exe > Run as administrator for full diagnostics.{RESET}");
+        ui::log(format!("{RED}Not running as Administrator: network and frame tracing will be unavailable.{RESET}"));
+        ui::log(format!("{RED}Right-click lagscope.exe > Run as administrator for full diagnostics.{RESET}"));
     }
     session.meta_set("elevated", elevated.into());
     session.meta_set(
@@ -60,11 +83,12 @@ pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
             "wifi_check": cfg.wifi_check,
         }),
     );
+    session.meta_set("profile", serde_json::to_value(&cfg.profile).unwrap_or_default());
     session.meta_set("logical_cpus", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0).into());
+    session.meta_set("ui", (if console_input { "console" } else { "gui" }).into());
 
     let app = Arc::new(App::new(cfg, session));
-    console::install_ctrl_handler(app.clone());
-    ui::activate();
+    let cpu_at_start = process_cpu_secs();
 
     let mut running: Vec<Running> = Vec::new();
     let mut add = |name: &str, r: Result<Running>| match r {
@@ -89,11 +113,14 @@ pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
     add("wlan_etw", super::wlan_etw::start(app.clone()));
     add("wifi_driver", super::wlan_etw::start_ndis(app.clone()));
     add("stall", Ok(stall::start(app.clone())));
+    add("drivers", super::drivers::start(app.clone()));
     add("cpu", cpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     add("gpu", gpu::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
     let marker = hotkey::Marker::new(app.clone());
     add("hotkey", hotkey::start(app.clone(), marker.clone()));
-    add("console", Ok(console::start_input(app.clone(), marker)));
+    if console_input {
+        add("console", Ok(console::start_input(app.clone(), marker.clone())));
+    }
     add("sysinfo", Ok(sysinfo::start(app.clone())));
     let after_stop = hooks.map(|h| {
         add("wifi_check", Ok((h.start)(app.clone())));
@@ -108,85 +135,141 @@ pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
         }
     });
 
-    let started = Instant::now();
-    let deadline = app.cfg.duration_s.map(|s| started + Duration::from_secs(s));
     if app.cfg.wifi_check.is_none() {
-        app.session.event(
-            "start",
-            format!("press {} (or M in this window) at every lag spike; Q to stop and build the report", app.cfg.hotkey),
-        );
+        let how = if console_input { "press {} (or M in this window) at every lag spike; Q to stop and build the report" } else { "press {} at every lag spike" };
+        app.session.event("start", how.replace("{}", &app.cfg.hotkey));
     }
-    while !app.stopping() {
-        ui::render(&status_lines(&app, started.elapsed()));
-        std::thread::sleep(Duration::from_millis(500));
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            app.session.event("stop", "duration reached");
-            app.stop.store(true, Ordering::SeqCst);
+    Ok(Capture { app, marker, running, flusher: Some(flusher), started: Instant::now(), cpu_at_start, after_stop })
+}
+
+impl Capture {
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Applies the duration limit. Returns true while still recording.
+    pub fn tick(&self) -> bool {
+        if !self.app.stopping() && self.app.cfg.duration_s.is_some_and(|s| self.started.elapsed() >= Duration::from_secs(s)) {
+            self.app.session.event("stop", "duration reached");
+            self.app.stop.store(true, Ordering::SeqCst);
+        }
+        !self.app.stopping()
+    }
+
+    pub fn request_stop(&self, why: &str) {
+        if !self.app.stopping() {
+            self.app.session.event("user", why);
+            self.app.stop.store(true, Ordering::SeqCst);
         }
     }
 
+    /// Stops the collectors, runs the after-stop step and builds the report and zip.
+    pub fn finish(mut self) -> Finished {
+        self.app.stop.store(true, Ordering::SeqCst);
+        for r in self.running.iter_mut().rev() {
+            r.stop();
+        }
+        if let Some(f) = self.flusher.take() {
+            let _ = f.join();
+        }
+        if let Some(f) = self.after_stop.take() {
+            f(&self.app);
+        }
+        let cpu = process_cpu_secs() - self.cpu_at_start;
+        finalize(&self.app, self.started.elapsed(), cpu)
+    }
+}
+
+pub fn run(cfg: Config) -> Result<()> {
+    run_with(cfg, None)
+}
+
+/// Console mode: live status block, M/Q keys, then the report.
+pub fn run_with(cfg: Config, hooks: Option<Hooks>) -> Result<()> {
+    console::setup();
+    ui::activate();
+    let cap = match start(cfg, hooks, true) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::deactivate();
+            return Err(e);
+        }
+    };
+    console::install_ctrl_handler(cap.app.clone());
+    while cap.tick() {
+        ui::render(&status_lines(&cap.app, cap.elapsed()));
+        std::thread::sleep(Duration::from_millis(500));
+    }
     ui::log("Stopping collectors ...");
     ui::render(&[]);
-    for r in running.iter_mut().rev() {
-        r.stop();
-    }
-    let _ = flusher.join();
     ui::deactivate();
-    if let Some(f) = after_stop {
-        f(&app);
-    }
-    finalize(&app, started.elapsed());
+    cap.finish();
     console::FINISHED.store(true, Ordering::SeqCst);
     println!("\nPress any key to close this window.");
     console::wait_key();
     Ok(())
 }
 
-/// CPU time used by LagScope itself, as % of one logical CPU and of the whole machine.
-fn own_cpu(elapsed: Duration) -> (f64, f64) {
+/// CPU seconds (user + kernel) used by this process so far.
+fn process_cpu_secs() -> f64 {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
     let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
     let (mut c, mut e, mut k, mut u) = (z, z, z, z);
     unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
     let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
-    let busy = ft(k) + ft(u);
-    let one_cpu = busy / elapsed.as_secs_f64().max(1.0) * 100.0;
-    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
-    (one_cpu, one_cpu / ncpu)
+    ft(k) + ft(u)
 }
 
-fn finalize(app: &App, elapsed: Duration) {
+fn finalize(app: &App, elapsed: Duration, cpu_secs: f64) -> Finished {
     let s = &app.session;
-    let (one, all) = own_cpu(elapsed);
+    let mut out = Finished { dir: s.dir.clone(), ..Default::default() };
+    // Opened and closed right away (e.g. from the menu): nothing worth keeping.
+    if app.cfg.wifi_check.is_none() && elapsed < Duration::from_secs(15) && app.live.lock().unwrap().marks == 0 {
+        s.close_all();
+        let _ = std::fs::remove_dir_all(&s.dir);
+        ui::log(format!("Stopped after {:.0} s - too short to analyse, nothing was saved.", elapsed.as_secs_f64()));
+        out.discarded = true;
+        return out;
+    }
+    let one = cpu_secs / elapsed.as_secs_f64().max(1.0) * 100.0;
+    let all = one / std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
     s.meta_set("tool_cpu_pct_of_one_core", ((one * 100.0).round() / 100.0).into());
     s.meta_set("tool_cpu_pct_of_machine", ((all * 1000.0).round() / 1000.0).into());
-    println!("LagScope's own CPU use: {all:.2}% of the machine ({one:.1}% of one core)");
+    ui::log(format!("LagScope's own CPU use: {all:.2}% of the machine ({one:.1}% of one core)"));
     s.meta_set("duration_s", elapsed.as_secs_f64().into());
     s.meta_set("marks", app.live.lock().unwrap().marks.into());
     s.event("stop", format!("session ended after {:.0}s", elapsed.as_secs_f64()));
     s.flush_all();
     let _ = s.write_meta();
-    println!("Exporting event logs ...");
+    ui::log("Exporting event logs ...");
     sysinfo::export_event_logs(app);
-    println!("Analysing ...");
+    ui::log("Analysing ...");
     match crate::analyze::run(&s.dir) {
         Ok(summary) => {
-            println!("{summary}");
-            println!("{GREEN}Report: {}{RESET}", s.dir.join("report.html").display());
+            for l in summary.lines() {
+                ui::log(l.to_string());
+            }
+            out.headline = summary.lines().find(|l| l.starts_with("== ")).map(|l| l.trim_matches(['=', ' ']).to_string()).unwrap_or_default();
+            out.report = Some(s.dir.join("report.html"));
+            ui::log(format!("{GREEN}Report: {}{RESET}", s.dir.join("report.html").display()));
         }
-        Err(e) => println!("{RED}Analysis failed: {e:#}{RESET} (raw data is still saved)"),
+        Err(e) => ui::log(format!("{RED}Analysis failed: {e:#}{RESET} (raw data is still saved)")),
     }
     if app.cfg.zip {
+        s.close_all();
         match crate::session::zip_dir(&s.dir) {
-            Ok(z) => println!("{GREEN}{BOLD}Send this file: {}{RESET}", z.display()),
-            Err(e) => println!("{RED}Zip failed: {e:#}{RESET}"),
+            Ok(z) => {
+                ui::log(format!("{GREEN}{BOLD}Send this file: {}{RESET}", z.display()));
+                out.zip = Some(z);
+            }
+            Err(e) => ui::log(format!("{RED}Zip failed: {e:#}{RESET}")),
         }
     }
-    let report = s.dir.join("report.html");
-    if report.exists() && app.cfg.open_report {
-        let _ = std::process::Command::new(super::windows_dir().join("explorer.exe")).arg(&report).spawn();
+    if out.report.is_some() && app.cfg.open_report {
+        super::open_path(&s.dir.join("report.html"));
     }
+    out
 }
 
 fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
@@ -220,7 +303,7 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
     let pid = app.game_pid.load(Ordering::Relaxed);
     if check {
     } else if pid == 0 {
-        out.push(format!("Game:   {YELLOW}waiting for {}{RESET}", app.cfg.processes.join(" / ")));
+        out.push(format!("Game:   {YELLOW}waiting for {}{RESET}", app.game_name()));
     } else {
         let server = app.server.lock().unwrap().map(|s| s.to_string()).unwrap_or("detecting...".into());
         let fresh = now - l.game_net_updated_us < 2_500_000;
@@ -234,7 +317,7 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
         } else {
             format!("{DIM}no game traffic{RESET}")
         };
-        out.push(format!("Game:   pid {pid}  server {CYAN}{server}{RESET}  {net}"));
+        out.push(format!("Game:   {} pid {pid}  server {CYAN}{server}{RESET}  {net}", app.game_name()));
         let frames = if now - l.frames_updated_us < 2_500_000 {
             let col = if l.max_frame_ms > 50.0 { RED } else if l.max_frame_ms > 25.0 { YELLOW } else { GREEN };
             format!("{:.0} fps  worst frame {col}{:.1} ms{RESET}", l.fps, l.max_frame_ms)
@@ -278,6 +361,9 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
         l.cpu.unwrap_or_else(|| "-".into()),
         l.gpu.unwrap_or_else(|| "-".into())
     ));
+    if let Some(d) = &l.drivers {
+        out.push(format!("Drivers: DPC/ISR {d} {DIM}(last 10 s){RESET}"));
+    }
     let failed: Vec<&String> = l.collectors.iter().filter(|(_, v)| v.as_str() != "ok").map(|(k, _)| k).collect();
     if !failed.is_empty() {
         out.push(format!("{RED}Unavailable: {}{RESET}", failed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));

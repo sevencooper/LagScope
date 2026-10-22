@@ -55,15 +55,72 @@ pub fn start(app: Arc<App>) -> Running {
     update(&app, first, true);
     let a = app.clone();
     let t = spawn("procwatch", move || {
+        let mut streak = HashMap::new();
         while a.sleep_ms(1000) {
-            update(&a, snapshot(), false);
+            let map = snapshot();
+            auto_detect(&a, &map, &mut streak);
+            update(&a, map, false);
         }
     });
     Running::threads("procwatch", vec![t])
 }
 
+/// Programs that present frames but are not games (ignored by auto-detect).
+const NOT_GAMES: &[&str] = &[
+    "dwm.exe", "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe",
+    "msedgewebview2.exe", "discord.exe", "steamwebhelper.exe", "steam.exe", "epicgameslauncher.exe", "battle.net.exe",
+    "riotclientux.exe", "eadesktop.exe", "ubisoftconnect.exe", "obs64.exe", "obs32.exe", "spotify.exe", "teams.exe",
+    "ms-teams.exe", "slack.exe", "zoom.exe", "code.exe", "windowsterminal.exe", "conhost.exe", "lagscope.exe",
+    "applicationframehost.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+    "textinputhost.exe", "nvidia overlay.exe", "nvcontainer.exe", "medal.exe", "overwolf.exe", "photos.exe",
+    "vlc.exe", "mpc-hc64.exe", "wallpaper64.exe", "wallpaper32.exe", "rtss.exe", "msiafterburner.exe",
+];
+
+/// Auto-detect: the process that keeps presenting the most frames (>= 30/s for 5 s) is the game.
+fn auto_detect(app: &App, map: &HashMap<u32, String>, streak: &mut HashMap<String, u32>) {
+    if !app.cfg.processes.is_empty() {
+        return;
+    }
+    let counts: HashMap<u32, u32> = std::mem::take(&mut *app.auto_presents.lock().unwrap());
+    let mut current = app.auto_game.lock().unwrap();
+    if let Some(name) = current.clone() {
+        // Forget a game that has exited so the next one can be picked up.
+        if !map.values().any(|n| n.eq_ignore_ascii_case(&name)) {
+            app.session.event("game", format!("{name} exited; waiting for the next game"));
+            *current = None;
+        }
+        return;
+    }
+    let best = counts
+        .iter()
+        .filter_map(|(pid, n)| map.get(pid).map(|name| (name, *n)))
+        .filter(|(name, _)| !NOT_GAMES.contains(&name.to_ascii_lowercase().as_str()))
+        .max_by_key(|(_, n)| *n);
+    let Some((name, n)) = best.filter(|(_, n)| *n >= 30) else {
+        streak.clear();
+        return;
+    };
+    let s = streak.entry(name.clone()).or_default();
+    *s += 1;
+    if *s >= 5 {
+        app.session.event("game", format!("auto-detected game: {name} ({n} frames/s)"));
+        app.session.meta_push("detected_games", name.clone().into());
+        // A known game: analyse it with its own profile.
+        let (all, _) = crate::profile::load_all(&crate::profile::user_dirs());
+        if let Some(p) = crate::profile::find(&all, name).filter(|p| !p.is_auto()) {
+            app.session.event("game", format!("using the {} profile", p.name));
+            app.session.meta_set("profile", serde_json::to_value(p).unwrap_or_default());
+        }
+        *current = Some(name.clone());
+        streak.clear();
+    }
+}
+
 fn update(app: &App, map: HashMap<u32, String>, first: bool) {
-    let wanted: Vec<String> = app.cfg.processes.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut wanted: Vec<String> = app.cfg.processes.iter().map(|s| s.to_ascii_lowercase()).collect();
+    if let Some(g) = app.auto_game.lock().unwrap().as_ref() {
+        wanted.push(g.to_ascii_lowercase());
+    }
     let game: HashSet<u32> = map
         .iter()
         .filter(|(_, n)| wanted.contains(&n.to_ascii_lowercase()))
@@ -73,7 +130,7 @@ fn update(app: &App, map: HashMap<u32, String>, first: bool) {
     if game != old {
         let started: Vec<String> = game.difference(&old).map(|p| p.to_string()).collect();
         let exited: Vec<String> = old.difference(&game).map(|p| p.to_string()).collect();
-        let name = app.cfg.processes.join("/");
+        let name = app.game_name();
         if !started.is_empty() {
             app.session.event("game", format!("{name} running (pid {})", started.join(", ")));
         }

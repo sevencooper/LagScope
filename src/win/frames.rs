@@ -35,6 +35,10 @@ struct FrameState {
 impl FrameState {
     fn on_event(&mut self, ev: &Event) {
         if !self.app.is_game_pid(ev.pid()) {
+            // Auto-detect: count who presents frames, the busiest one is the game.
+            if ev.id() == 42 && self.app.cfg.processes.is_empty() && self.app.game_pid.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                *self.app.auto_presents.lock().unwrap().entry(ev.pid()).or_default() += 1;
+            }
             return;
         }
         let t = self.app.session.clock.us_from_raw(ev.timestamp());

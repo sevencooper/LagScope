@@ -10,7 +10,9 @@ use crate::session::Session;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Executable names (case-insensitive) of the game to watch.
+    /// The game profile (what to watch, analysis settings).
+    pub profile: crate::profile::Profile,
+    /// Executable names (case-insensitive) of the game to watch; empty = auto-detect.
     pub processes: Vec<String>,
     pub hotkey: String,
     pub probe_hz: u32,
@@ -31,8 +33,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let profile = crate::profile::builtin().remove(0);
         Config {
-            processes: vec!["Discovery.exe".into()],
+            processes: profile.processes.clone(),
+            profile,
             hotkey: "F8".into(),
             probe_hz: 20,
             probes: true,
@@ -74,6 +78,9 @@ pub struct LiveData {
     pub wifi_etw_quality: Option<u32>,
     pub wifi_location_blocked: bool,
     pub stall_max_ms: f64,
+    pub drivers: Option<String>,
+    /// Worst driver DPC/ISR run in the last 10 s (ms).
+    pub drivers_worst_ms: f64,
     pub cpu: Option<String>,
     pub gpu: Option<String>,
     pub top_talker: Option<String>,
@@ -95,6 +102,10 @@ pub struct App {
     pub gw_samples: Mutex<Vec<(i64, Option<f64>)>>,
     /// Progress line shown in the status block during the Wi-Fi check.
     pub check_status: Mutex<Option<String>>,
+    /// Auto-detect profile: frames presented per process since the last check, and the
+    /// executable name chosen as the game.
+    pub auto_presents: Mutex<HashMap<u32, u32>>,
+    pub auto_game: Mutex<Option<String>>,
 }
 
 impl App {
@@ -110,11 +121,22 @@ impl App {
             live: Mutex::new(LiveData::default()),
             gw_samples: Mutex::new(Vec::new()),
             check_status: Mutex::new(None),
+            auto_presents: Mutex::new(HashMap::new()),
+            auto_game: Mutex::new(None),
         }
     }
 
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Name of the game being watched, for messages.
+    pub fn game_name(&self) -> String {
+        if self.cfg.processes.is_empty() {
+            self.auto_game.lock().unwrap().clone().unwrap_or_else(|| "any game (auto-detect)".into())
+        } else {
+            self.cfg.profile.name.clone()
+        }
     }
 
     pub fn is_game_pid(&self, pid: u32) -> bool {

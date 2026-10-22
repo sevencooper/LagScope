@@ -1,4 +1,10 @@
+// A GUI program on Windows: double-click opens the window without a console; command-line
+// use attaches to the terminal (see win::console::ensure).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod analyze;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod profile;
 // Capture-side modules are only exercised by the Windows collectors.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod app;
@@ -20,16 +26,20 @@ LagScope - records network, frame-pacing, Wi-Fi and system data while you play,
 so lag spikes can be traced to their cause.
 
 USAGE:
-    lagscope.exe                      menu (double-click): Wi-Fi check, record, undo
+    lagscope.exe                      the LagScope window (double-click)
+    lagscope.exe --console            console menu: Wi-Fi check, record, undo
     lagscope.exe --wifi-check         Wi-Fi check & fix: test Wi-Fi settings one at a time
     lagscope.exe --record [OPTIONS]   record a session while playing
+    lagscope.exe games                list the game profiles
     lagscope.exe --undo               undo the settings changes LagScope was told to keep
     lagscope.exe analyze <DIR>        (re)build report.html for a recorded session
     lagscope.exe dump-etw <net|dxgi> [SECS] [MAX]
                                       print raw decoded ETW events (debugging)
 
 OPTIONS:
-    --process <NAME.exe>   game executable to watch (repeatable; default Discovery.exe = THE FINALS)
+    --game <ID>            game profile: the_finals, cs2, auto (any game), or your own
+                           (JSON files in a 'profiles' folder next to the exe; default: last used)
+    --process <NAME.exe>   watch this executable instead (repeatable)
     --hotkey <KEY>         lag-spike mark key, e.g. F8, F9, Pause, Ctrl+Shift+M (default F8)
     --probe-hz <N>         ICMP probes per second per target (default 20)
     --no-probes            disable ICMP probing
@@ -45,8 +55,17 @@ OPTIONS:
     --force-tests          Wi-Fi check: run the tests even if the baseline looks clean
 ";
 
+fn set_profile(cfg: &mut Config, p: &profile::Profile) {
+    cfg.profile = p.clone();
+    cfg.processes = p.processes.clone();
+}
+
 fn parse_config(args: &[String]) -> Result<Config> {
     let mut cfg = Config::default();
+    let (profiles, _) = profile::load_all(&profile::user_dirs());
+    if let Some(p) = profile::last_game().and_then(|g| profile::find(&profiles, &g).cloned()) {
+        set_profile(&mut cfg, &p);
+    }
     let mut custom_process = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -57,7 +76,22 @@ fn parse_config(args: &[String]) -> Result<Config> {
                     cfg.processes.clear();
                     custom_process = true;
                 }
-                cfg.processes.push(val("--process")?);
+                let p = val("--process")?;
+                cfg.processes.push(p.clone());
+                cfg.profile = profile::find(&profiles, &p).cloned().unwrap_or_else(|| profile::Profile {
+                    id: "custom".into(),
+                    name: cfg.processes.join(", "),
+                    processes: cfg.processes.clone(),
+                    ..profile::builtin().last().unwrap().clone()
+                });
+            }
+            "--game" => {
+                let g = val("--game")?;
+                let Some(p) = profile::find(&profiles, &g) else {
+                    let ids: Vec<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
+                    bail!("unknown game '{g}' (known: {})", ids.join(", "));
+                };
+                set_profile(&mut cfg, p);
             }
             "--hotkey" => cfg.hotkey = val("--hotkey")?,
             "--probe-hz" => cfg.probe_hz = val("--probe-hz")?.parse()?,
@@ -83,8 +117,8 @@ fn menu() -> char {
     use ui::{BOLD, DIM, RESET};
     win::console::setup();
     let kept = win::fixes::kept();
-    println!("{BOLD}LagScope {}{RESET} - finds where lag in THE FINALS comes from\n", env!("CARGO_PKG_VERSION"));
-    println!("  {BOLD}1{RESET}  Wi-Fi check & fix     {DIM}do this first: at the desktop, game closed, about 12 minutes{RESET}");
+    println!("{BOLD}LagScope {}{RESET} - finds where lag in online games comes from\n", env!("CARGO_PKG_VERSION"));
+    println!("  {BOLD}1{RESET}  Wi-Fi check & fix     {DIM}do this first: at the desktop, game closed, about 15 minutes{RESET}");
     println!("  {BOLD}2{RESET}  Record while playing  {DIM}start it, play, press F8 at every hiccup, Q when done{RESET}");
     if !kept.is_empty() {
         println!("  {BOLD}3{RESET}  Undo the {} setting change(s) LagScope made", kept.len());
@@ -94,6 +128,27 @@ fn menu() -> char {
     let c = win::console::read_choice(if kept.is_empty() { "12q" } else { "123q" }, None);
     println!("{c}\n");
     c
+}
+
+/// Asks which game to record (Enter = the one used last time).
+#[cfg(windows)]
+fn pick_game(current: &str) -> profile::Profile {
+    use ui::{BOLD, DIM, RESET};
+    let (all, errors) = profile::load_all(&profile::user_dirs());
+    for e in errors {
+        println!("problem in profile file {e}");
+    }
+    let def = all.iter().position(|p| p.id == current).unwrap_or(0);
+    println!("Which game?");
+    let keys: String = (1..=all.len().min(9)).map(|i| char::from(b'0' + i as u8)).collect();
+    for (i, p) in all.iter().take(9).enumerate() {
+        println!("  {BOLD}{}{RESET}  {}{}", i + 1, p.name, if i == def { format!("  {DIM}(Enter){RESET}") } else { String::new() });
+    }
+    print!("Choose: ");
+    let c = win::console::read_choice(&keys, Some(char::from(b'1' + def as u8)));
+    let i = c.to_digit(10).map(|d| d as usize - 1).unwrap_or(def);
+    println!("{}\n", all[i].name);
+    all[i].clone()
 }
 
 #[cfg(windows)]
@@ -113,10 +168,37 @@ fn undo() {
 fn main() -> Result<()> {
     #[cfg(windows)]
     win::harden_dll_search();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    {
+        if args.is_empty() {
+            return win::gui::run(parse_config(&[])?, None);
+        }
+        if args[0] == "--gui-selftest" {
+            let scenario = args.get(1).cloned().unwrap_or_else(|| "idle".into());
+            let out = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("lagscope_selftest"));
+            let rest: Vec<String> = args.iter().skip(3).cloned().collect();
+            return win::gui::run(parse_config(&rest)?, Some((scenario, out)));
+        }
+        win::console::ensure();
+        if args[0] == "--console" {
+            args.remove(0);
+        }
+    }
     match args.first().map(String::as_str) {
         Some("-h" | "--help" | "help") => {
             print!("{HELP}");
+            Ok(())
+        }
+        Some("games") => {
+            let (all, errors) = profile::load_all(&profile::user_dirs());
+            for p in &all {
+                println!("{:<12} {:<28} {}", p.id, p.name, if p.is_auto() { "(finds the running game)".into() } else { p.processes.join(", ") });
+            }
+            for e in errors {
+                println!("problem in profile file {e}");
+            }
             Ok(())
         }
         Some("analyze") => {
@@ -164,6 +246,11 @@ fn main() -> Result<()> {
                 match menu() {
                     'q' => return Ok(()),
                     '1' => cfg.wifi_check = Some(60),
+                    '2' => {
+                        let p = pick_game(&cfg.profile.id);
+                        set_profile(&mut cfg, &p);
+                        profile::save_last_game(&p.id);
+                    }
                     '3' => {
                         undo();
                         println!("\nPress any key to close this window.");

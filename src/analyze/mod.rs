@@ -187,6 +187,36 @@ mod tests {
     }
 
     #[test]
+    fn driver_hiccups_are_tied_to_stalls_and_frames() {
+        let mut s = Synth::new("driver");
+        // Every 20 s: a 4 ms Wi-Fi driver DPC, a 150 ms frame hitch and a 150 ms packet hole.
+        let hole = |t: i64| t > 10_000_000 && (t - 10_000_000).rem_euclid(20_000_000) < 150_000;
+        s.fill(120, hole, |_| 2_000, hole);
+        s.write();
+        let mut long = String::from("t_us,kind,driver,dur_us,cpu\n");
+        let mut per_s = String::from("t_us,driver,dpc_n,dpc_total_us,dpc_max_us,isr_n,isr_total_us,isr_max_us\n");
+        for k in 0..6 {
+            let t = 10_000_000 + k * 20_000_000;
+            writeln!(long, "{},D,wifidrv.sys,4000,0", t + 20_000).unwrap();
+        }
+        for sec in 0..120 {
+            writeln!(per_s, "{},_all,1000,50000,{},0,0,0", sec * 1_000_000, if (sec - 10) % 20 == 0 { 4000 } else { 200 }).unwrap();
+        }
+        std::fs::write(s.dir.join("driver_long.csv"), long).unwrap();
+        std::fs::write(s.dir.join("drivers_1s.csv"), per_s).unwrap();
+        let meta = r#"{"route":{"is_wifi":true},"config":{"processes":["Discovery.exe"]},"elevated":true,
+            "driver_latency":{"drivers":[{"driver":"wifidrv.sys","dpc_n":100,"dpc_total_ms":30,"dpc_max_us":4000,"isr_n":0,"isr_total_ms":0,"isr_max_us":0,"hist_dpc":[0,0,0,0,0,0,6,0,0],"hist_isr":[0,0,0,0,0,0,0,0,0]}]}}"#;
+        std::fs::write(s.dir.join("meta.json"), meta).unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert_eq!(a.anomalies.iter().filter(|x| x.kind == Kind::DriverLatency).count(), 6);
+        assert!(a.gap_correlation["driver DPC/ISR ≥1 ms"] > 0.8, "{:?}", a.gap_correlation);
+        assert!(a.findings.iter().any(|f| f.contains("high (") && f.contains("wifidrv.sys")), "{:#?}", a.findings);
+        assert!(a.findings.iter().any(|f| f.contains("line up with network stalls")), "{:#?}", a.findings);
+        assert!(a.recommendations.iter().any(|r| r.contains("wifidrv.sys")));
+        super::run(&s.dir).unwrap();
+    }
+
+    #[test]
     fn periodicity_basic() {
         let t: Vec<i64> = (0..10).map(|k| 5_000_000 + k * 30_000_000).collect();
         let (p, s, _) = periodicity(&t, 320_000_000).unwrap();
