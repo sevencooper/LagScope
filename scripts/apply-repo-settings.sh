@@ -45,6 +45,10 @@ try gh api -X PUT "repos/$REPO/actions/permissions/fork-pr-contributor-approval"
 try gh api -X PUT "repos/$REPO/private-vulnerability-reporting" --silent
 try gh api -X PUT "repos/$REPO/vulnerability-alerts" --silent
 try gh api -X PUT "repos/$REPO/automated-security-fixes" --silent
+# Secret scanning with push protection (free for public repositories, but off by default).
+try gh api -X PATCH "repos/$REPO" --silent --input - <<'JSON'
+{"security_and_analysis": {"secret_scanning": {"status": "enabled"}, "secret_scanning_push_protection": {"status": "enabled"}}}
+JSON
 
 # Labels used by the issue templates and CONTRIBUTING.md.
 while IFS='|' read -r name color desc; do
