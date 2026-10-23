@@ -32,6 +32,9 @@ pub enum Kind {
     /// The game read a lot from disk through page faults in one second (asset streaming
     /// or memory paging).
     GamePaging,
+    /// The link froze in the upload direction: pings through the router stalled while the
+    /// game's incoming stream kept arriving, so the PC's own packets were held back.
+    UploadStall,
 }
 
 impl Kind {
@@ -57,6 +60,7 @@ impl Kind {
             Kind::DriverLatency => "driver DPC/ISR",
             Kind::DiskSlow => "slow disk I/O",
             Kind::GamePaging => "game reading from disk",
+            Kind::UploadStall => "upload freeze",
         }
     }
 }
@@ -184,6 +188,10 @@ pub struct Analysis {
     /// Intervals around times the player switched away from the game (alt-tab etc.), when
     /// its frames are not judged.
     pub away: Vec<(i64, i64)>,
+    /// How many times the player switched away.
+    pub away_switches: usize,
+    /// Router freezes that start at the same point within a second: (that many, of all).
+    pub second_timer: Option<(usize, usize)>,
     /// The game's own region pings, nearest first.
     pub beacons: Vec<Beacon>,
     /// Wi-Fi driver retry counters were implausible and ignored.
@@ -570,8 +578,14 @@ fn system_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
     }
 }
 
+/// Frames that are judged: in match play, not in its first seconds (loading into the map
+/// hitches in every game) and not while the player was switched away.
+fn frame_judged(phases: &[(i64, i64)], away: &[(i64, i64)], t: i64) -> bool {
+    in_phases(phases, t) && !phases.iter().any(|&(a, _)| t >= a && t < a + 5_000_000) && !in_any(away, t)
+}
+
 fn frame_analysis(d: &Data, phases: &[(i64, i64)], away: &[(i64, i64)], out: &mut Vec<Anomaly>) -> FrameStats {
-    let counted = |t: i64| in_phases(phases, t) && !in_any(away, t);
+    let counted = |t: i64| frame_judged(phases, away, t);
     let times: Vec<i64> = d.frames.iter().map(|f| f.0).collect();
     let iv: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
     let normal = sorted(
@@ -649,7 +663,30 @@ pub fn away_intervals(focus: &[(i64, bool)], end: i64) -> Vec<(i64, i64)> {
     if let Some(l) = left {
         out.push((l - 500_000, end));
     }
-    out
+    // Quick switches back and forth overlap: merge them.
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (a, b) in out {
+        match merged.last_mut() {
+            Some(m) if a <= m.1 => m.1 = m.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// How many times the player switched away from the game (after it first had focus).
+pub fn away_switches(focus: &[(i64, bool)]) -> usize {
+    let mut seen = false;
+    let mut n = 0;
+    let mut prev = None;
+    for &(_, game) in focus {
+        if seen && !game && prev == Some(true) {
+            n += 1;
+        }
+        seen |= game;
+        prev = Some(game);
+    }
+    n
 }
 
 /// Match play = seconds where the client sends at a high rate (input/state updates). In
@@ -771,6 +808,9 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     if top < 0.5 {
         return None;
     }
+    let rate = times.len() as f64 / (end as f64 / 1e6).max(1.0);
+    // With many events, long periods match by chance (some event is always near).
+    let chance_at = |p: f64| 1.0 - (-rate * 2.0 * tol_of(p)).exp();
     // Centre of the first plateau of top-scoring candidates (tolerance makes neighbours tie).
     let first = best.iter().position(|b| b.1 >= top - 1e-9)?;
     let last = first + best[first..].iter().take_while(|b| b.1 >= top - 1e-9).count() - 1;
@@ -778,14 +818,17 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     // Prefer the fundamental over its multiples (an event every 10 s also matches 30 s and
     // 90 s): take the shortest p/k that scores nearly as well (missed events cost the fundamental
     // more) and clearly beats chance.
-    let rate = times.len() as f64 / (end as f64 / 1e6).max(1.0);
     for k in (2..=(p / 3.0) as usize).rev() {
         let q = p / k as f64;
-        let chance = 1.0 - (-rate * 2.0 * tol_of(q)).exp();
+        let chance = chance_at(q);
         if score(q).is_some_and(|s| s >= top * 0.75 && s - chance >= 0.5) {
             p = q;
             break;
         }
+    }
+    // The chosen period must beat chance clearly.
+    if score(p).is_none_or(|sc| sc - chance_at(p) < 0.5) {
+        return None;
     }
     // Refine on the actual spacing of events (the scan grid above is only 0.25 s fine).
     let tol = tol_of(p);
@@ -802,6 +845,21 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
         p = est[est.len() / 2];
     }
     Some(((p * 100.0).round() / 100.0, top, times.len()))
+}
+
+/// Events that start at the same point within a second (+-75 ms), e.g. always at x.88 s: a
+/// 1-second timer somewhere (router, adapter firmware, driver) sets them off. Returns (how
+/// many share that point, total) when at least 60% do; by chance it would be about 15%.
+pub fn second_timer(times: &[i64]) -> Option<(usize, usize)> {
+    if times.len() < 8 {
+        return None;
+    }
+    let mut bins = [0usize; 20];
+    for &t in times {
+        bins[(t.rem_euclid(1_000_000) / 50_000) as usize] += 1;
+    }
+    let best = (0..20).map(|i| bins[(i + 19) % 20] + bins[i] + bins[(i + 1) % 20]).max().unwrap_or(0);
+    (best * 10 >= times.len() * 6).then_some((best, times.len()))
 }
 
 /// Driver commands (NDIS requests) that keep showing up just before router-ping freezes:
@@ -864,7 +922,7 @@ fn corr(an: &[Anomaly], base: &[&Anomaly], kinds: &[Kind], target: Option<&str>,
 
 const PROBE: &[Kind] = &[Kind::ProbeSpike, Kind::ProbeLoss, Kind::RttPlateau];
 
-fn verdict_for(an: &[Anomaly], t: i64, n: usize, wifi: bool) -> Verdict {
+fn verdict_for(an: &[Anomaly], t: i64, n: usize, wifi: bool, away: &[(i64, i64)]) -> Verdict {
     // People press the key a second or two after noticing: judge the preceding ~4 s first,
     // and only fall back to a wider window (with low confidence) if that is clean.
     let mut v = verdict_window(an, t, n, t - 4_000_000, t + 1_000_000, wifi);
@@ -873,6 +931,14 @@ fn verdict_for(an: &[Anomaly], t: i64, n: usize, wifi: bool) -> Verdict {
         if wide.category != "unknown" {
             v = Verdict { culprit: format!("Possibly (5-10 s before the key press): {}", wide.culprit), confidence: "low", ..wide };
         }
+    }
+    // Marked while switched away from the game: switching itself makes the game hitch, so
+    // a local, unexplained or only loosely matched verdict says nothing. Network problems
+    // right at the mark still count.
+    if (matches!(v.category, "local" | "unknown") || v.confidence == "low") && in_any(away, t) {
+        v.culprit = "You had switched away from the game (alt-tab or another window) at this moment; switching itself makes the game hitch, so this mark is not judged.".into();
+        v.category = "away";
+        v.confidence = "high";
     }
     v
 }
@@ -886,6 +952,7 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64, is_wifi: boo
     let frame = biggest(&[Kind::FrameHitch], None);
     let stall = biggest(&[Kind::Stall], None);
     let gw = biggest(PROBE, Some("gateway"));
+    let upload = biggest(&[Kind::UploadStall], None);
     let hop2 = biggest(PROBE, Some("hop2"));
     let inet = biggest(PROBE, Some("internet"));
     let server = biggest(PROBE, Some("server"));
@@ -897,7 +964,7 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64, is_wifi: boo
     let gpu = biggest(&[Kind::GpuLimit, Kind::Paging], None);
 
     let mut ev: Vec<String> = Vec::new();
-    for x in [&in_gap, &out_gap, &frame, &stall, &gw, &hop2, &inet, &server, &traffic, &dpc, &drv, &disk, &gpu].into_iter().flatten() {
+    for x in [&in_gap, &out_gap, &frame, &stall, &upload, &gw, &hop2, &inet, &server, &traffic, &dpc, &drv, &disk, &gpu].into_iter().flatten() {
         ev.push(format!("{:+.1}s {}: {}", (x.t - t) as f64 / 1e6, x.kind.label(), x.detail));
     }
     for w in wifi.iter().take(4) {
@@ -927,6 +994,13 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64, is_wifi: boo
         let local_side = out_gap.is_some() && overlaps(&out_gap, &in_gap, 300_000) && overlaps(&frame, &in_gap, 300_000);
         if local_side {
             ("Local PC: the game stopped sending and receiving at the same time as a frame hitch".into(), "local", "medium")
+        } else if let Some(u) = upload.as_ref().filter(|_| in_gap.is_none()) {
+            let link = if is_wifi { "Wi-Fi" } else { "Local network" };
+            (
+                format!("{link}: the PC's uploads froze for ~{:.0} ms while the game's incoming data kept flowing, so your actions reached the server late (this feels like rubber-banding or being pulled back)", u.value),
+                if is_wifi { "wifi" } else { "lan" },
+                "medium",
+            )
         } else if gw.is_some() && (in_gap.is_none() || overlaps(&gw, &in_gap, 500_000)) {
             let extra = if !wifi.is_empty() { format!(" ({} nearby)", wifi[0].kind.label()) } else { String::new() };
             if is_wifi {
@@ -1011,9 +1085,10 @@ pub fn analyze(d: &Data) -> Analysis {
     }
 
     res.away = away_intervals(&d.focus, d.duration_us);
+    res.away_switches = away_switches(&d.focus);
     res.frames = frame_analysis(d, &phases, &res.away, &mut an);
     for a in an.iter_mut().filter(|a| a.kind == Kind::FrameHitch) {
-        a.in_match = in_phases(&phases, a.t) && !in_any(&res.away, a.t);
+        a.in_match = frame_judged(&phases, &res.away, a.t);
     }
     res.beacons = beacons(d, &servers);
     // The game pings all regions at once (hundreds of packets within ~10 ms): mark those
@@ -1036,6 +1111,29 @@ pub fn analyze(d: &Data) -> Analysis {
     for (target, v) in &d.probes {
         let ips = d.probe_ips.get(target).cloned().unwrap_or_default();
         res.probes.push(probe_analysis(target, v, &ips, &mut an));
+    }
+    // Upload freezes: the path through the router froze (router and farther pings stalled
+    // together) while the game's incoming stream kept arriving.
+    if inbound.len() > 50 {
+        let ups: Vec<Anomaly> = an
+            .iter()
+            .filter(|g| g.target == "gateway" && g.kind == Kind::ProbeSpike && g.value >= 80.0)
+            .filter(|g| an.iter().any(|o| o.kind == Kind::ProbeSpike && o.target != "gateway" && o.overlaps(g.t - 100_000, g.end() + 100_000)))
+            .filter_map(|g| {
+                let (a, b) = (g.t - 50_000, g.t + (g.value * 1000.0) as i64 + 100_000);
+                let i = inbound.partition_point(|&x| x < a);
+                let j = inbound.partition_point(|&x| x <= b);
+                let inside = &inbound[i..j];
+                let max_gap = inside.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(i64::MAX);
+                let flowing = inside.len() >= 5 && max_gap < 60_000 && inside[0] - a < 60_000 && b - inside[inside.len() - 1] < 60_000;
+                flowing.then(|| {
+                    let mut u = Anomaly::new(g.t, (g.value * 1000.0) as i64, Kind::UploadStall, "gateway", g.value, format!("uploads froze for ~{:.0} ms (router and internet pings stalled, game data kept arriving)", g.value));
+                    u.in_match = in_phases(&phases, g.t);
+                    u
+                })
+            })
+            .collect();
+        an.extend(ups);
     }
     let order = ["gateway", "hop2", "internet", "server"];
     res.probes.sort_by_key(|p| order.iter().position(|o| *o == p.target).unwrap_or(9));
@@ -1128,9 +1226,11 @@ pub fn analyze(d: &Data) -> Analysis {
         c.insert("GPU limit / memory pressure".into(), corr(&an, &hitches, &[Kind::GpuLimit, Kind::Paging], None, 1_000_000, 200_000));
         res.hitch_correlation = c;
     }
+    let freezes: Vec<i64> = an.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike && a.value >= 80.0).map(|a| a.t).collect();
+    res.second_timer = second_timer(&freezes);
     res.wifi_check = super::experiments::from_session(d);
     res.driver_cmds = driver_cmd_correlation(d, &an);
-    res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1, !wired)).collect();
+    res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1, !wired, &res.away)).collect();
     res.anomalies = an;
     super::findings::summarize(d, &mut res);
     res

@@ -6,6 +6,19 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+- **Upload freezes:** when the PC's uploads freeze while the game's data keeps arriving
+  (which feels like rubber-banding or being pulled back), the report now says so, counts
+  them on the Wi-Fi / network line and explains marked spikes with it. Freezes that start at
+  the same point within each second are reported as a 1-second timer (router or adapter
+  firmware), not interference.
+- **Alt-tab marks:** a lag spike marked while switched away from the game is labelled as such
+  and no longer counts towards the headline.
+- **Fewer false alarms:** hitches while loading into a match (its first 5 s) are not counted;
+  a program is only blamed for stutters when it was busy during them clearly more often than
+  otherwise, and "System" (Windows itself) gets advice that makes sense; a laptop GPU at its
+  normal temperature target is no longer flagged; long fake "periods" (e.g. every 162 s) are
+  no longer reported.
+
 ## 0.4.6 (2026-10-22)
 
 - **AI analysis:** every recording now contains `AI_GUIDE.md`, which explains every file

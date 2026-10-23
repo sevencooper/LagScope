@@ -31,7 +31,11 @@ fn in_play(r: &Analysis, t: i64) -> bool {
 fn explain(name: &str) -> Option<&'static str> {
     let n = name.to_ascii_lowercase();
     let has = |keys: &[&str]| keys.iter().any(|k| n.contains(k));
-    Some(if has(&["msmpeng", "mpdefendercoreservice", "nissrv"]) {
+    Some(if n == "system" || n == "interrupts" {
+        "Windows' own kernel work (drivers, file system, memory management) was busy. It is not a program you can close: check the Drivers row of this report, and run LatencyMon to see which driver is responsible."
+    } else if n == "memory compression" {
+        "Windows was compressing memory because RAM was running short: close memory-hungry programs (browsers, launchers) while playing."
+    } else if has(&["msmpeng", "mpdefendercoreservice", "nissrv"]) {
         "Windows Security (Defender) was scanning. Let a scan finish before playing, or add the game's folder as an exclusion (Windows Security > Virus & threat protection > Manage settings > Exclusions)."
     } else if has(&["tiworker", "trustedinstaller", "wuauclt", "mousocoreworker", "usoclient", "wuaucore"]) {
         "Windows Update was working in the background. Let it finish (Settings > Windows Update) before playing."
@@ -106,6 +110,14 @@ fn background(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>
     hp.sort_by_key(|x| std::cmp::Reverse(x.1));
     hp.truncate(5);
     c.hitch_procs = hp.clone();
+    // How often the same window around a random moment of play catches the program that
+    // busy: a program busy much of the time is near many hitches by chance.
+    let busy_share = |name: &str| {
+        let busy: Vec<i64> = d.proc_cpu.iter().filter(|(t, n, p)| n == name && *p >= 30.0 && in_play(r, *t)).map(|x| x.0).collect();
+        let moments: Vec<i64> = d.cpu.iter().step_by(4).filter(|x| in_play(r, x.t)).map(|x| x.t).collect();
+        let hit = moments.iter().filter(|&&m| busy.iter().any(|&t| t >= m - 200_000 && t <= m + 1_200_000)).count();
+        hit as f64 / moments.len().max(1) as f64
+    };
 
     let busy: Vec<String> = avg.iter().filter(|x| x.1 >= 5.0).take(3).map(|(n, a, m)| format!("{} {a:.0}% (peak {m:.0}%)", short(n))).collect();
     if !busy.is_empty() {
@@ -113,9 +125,21 @@ fn background(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>
     }
     let mut blamed = false;
     if hitches.len() >= 3 {
-        if let Some((name, n)) = hp.first().filter(|x| x.1 * 10 >= hitches.len() * 3) {
-            f.push(format!("{n} of {} frame hitches came while {} was using a lot of CPU.", hitches.len(), short(name)));
-            rec.push(explain(name).map(String::from).unwrap_or_else(|| format!("{} was busy during the stutters: close it while playing and see if the stutter goes away.", short(name))));
+        let share = |n: usize| n as f64 / hitches.len() as f64;
+        if let Some((name, n)) = hp.iter().filter(|x| share(x.1) >= 0.3 && share(x.1) - busy_share(&x.0) >= 0.3).max_by(|a, b| (share(a.1) - busy_share(&a.0)).total_cmp(&(share(b.1) - busy_share(&b.0)))) {
+            f.push(format!(
+                "{n} of {} frame hitches came while {} was using a lot of CPU (it was that busy {:.0}% of the time otherwise).",
+                hitches.len(),
+                short(name),
+                busy_share(name) * 100.0
+            ));
+            let mut advice = explain(name).map(String::from).unwrap_or_else(|| format!("{} was busy during the stutters: close it while playing and see if the stutter goes away.", short(name)));
+            // Windows' memory manager runs as "System": with memory nearly full, that is the
+            // likelier reason.
+            if name == "System" && d.cpu.iter().filter_map(|x| x.commit_pct).fold(0.0, f64::max) >= 90.0 {
+                advice.push_str(" Here RAM + page file were nearly full, which keeps Windows' memory management busy: freeing memory (see the Memory row) is the first thing to try.");
+            }
+            rec.push(advice);
             c.cpu.push(format!("{} busy during {n} hitches", short(name)));
             blamed = true;
         }
@@ -324,12 +348,19 @@ fn software(d: &Data, f: &mut Vec<String>) {
     }
 }
 
-/// GPU clock limits (heat / power brake) that matter: often (once a minute or more) or
-/// together with frame hitches. A few short ones are normal, especially on laptops.
+/// Share of play time the GPU's clocks were held back by heat or a power brake.
+pub fn gpu_limit_share(d: &Data, r: &Analysis) -> f64 {
+    let rows: Vec<&str> = d.gpu.iter().filter(|g| in_play(r, g.t)).map(|g| g.reasons.as_str()).collect();
+    let limited = rows.iter().filter(|x| x.split('|').any(|k| matches!(k, "hw_slowdown" | "hw_thermal" | "sw_thermal" | "hw_power_brake"))).count();
+    limited as f64 / rows.len().max(1) as f64
+}
+
+/// GPU clock limits (heat / power brake) that matter. Laptop GPUs run at their temperature
+/// target by design, so for them only limits that line up with frame hitches count; a
+/// desktop card at its limit for a fifth of the time or more is not cooled well enough.
 pub fn gpu_limited(d: &Data, r: &Analysis) -> bool {
-    let n = r.anomalies.iter().filter(|a| a.kind == Kind::GpuLimit).count();
-    let per_min = n as f64 / (d.duration_us as f64 / 60e6).max(1.0);
-    n > 0 && (per_min >= 1.0 || r.hitch_correlation.get("GPU limit / memory pressure").copied().unwrap_or(0.0) >= 0.3)
+    let with_hitches = r.hitch_correlation.get("GPU limit / memory pressure").copied().unwrap_or(0.0) >= 0.3;
+    with_hitches || (!super::hardware::is_laptop(d) && gpu_limit_share(d, r) >= 0.2)
 }
 
 /// One line per area: OK, needs a look, or not measured.
@@ -346,8 +377,12 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
     match r.probes.iter().find(|p| p.target == "gateway" && p.sent > 0) {
         Some(g) => {
             let loss = g.lost as f64 * 100.0 / g.sent as f64;
-            let bad = clockwork || g.p99_ms > 20.0 || loss > 0.5 || !c.link.is_empty() || r.wifi_check.as_ref().is_some_and(|o| o.problem);
+            let ups: Vec<f64> = r.anomalies.iter().filter(|a| a.kind == Kind::UploadStall && a.in_match).map(|a| a.value).collect();
+            let bad = clockwork || g.p99_ms > 20.0 || loss > 0.5 || ups.len() >= 3 || !c.link.is_empty() || r.wifi_check.as_ref().is_some_and(|o| o.problem);
             let mut t = format!("router ping {:.0} ms, worst 1% {:.0} ms{}", g.p50_ms, g.p99_ms, if loss > 0.0 { format!(", {loss:.1}% lost") } else { String::new() });
+            if !ups.is_empty() {
+                t = format!("{} upload freezes of up to {:.0} ms; {t}", ups.len(), ups.iter().copied().fold(0.0, f64::max));
+            }
             if clockwork {
                 t = format!("freezes on a timer; {t}");
             }
@@ -434,9 +469,14 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
             add("GPU", None, "not measured".into());
         }
     } else {
-        let limits = r.anomalies.iter().filter(|a| a.kind == Kind::GpuLimit).count();
+        let share = gpu_limit_share(d, r);
         let temp = d.gpu.iter().filter_map(|g| g.temp).fold(0.0, f64::max);
-        add("GPU", Some(gpu_limited(d, r)), if limits > 0 { format!("slowed down by heat/power {limits}×, up to {temp:.0} °C") } else { format!("no slowdowns, up to {temp:.0} °C") });
+        let t = if share >= 0.01 {
+            format!("at its heat / power limit {:.0}% of the time{}, up to {temp:.0} °C", share * 100.0, if super::hardware::is_laptop(d) && !gpu_limited(d, r) { " (normal for a laptop)" } else { "" })
+        } else {
+            format!("no slowdowns, up to {temp:.0} °C")
+        };
+        add("GPU", Some(gpu_limited(d, r)), t);
     }
 
     match &c.memory {
