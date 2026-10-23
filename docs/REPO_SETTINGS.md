@@ -32,7 +32,7 @@ release (`.github/workflows/release.yml`), so this is what controls releases.
 | Outside contributors' PRs | CI waits for the maintainer's approval | A PR from a fork cannot run code on GitHub's runners unseen. |
 | Private vulnerability reporting | On | See [SECURITY.md](../SECURITY.md). |
 | Dependabot | Alerts, security fixes, and monthly update PRs (`.github/dependabot.yml`) | Known-vulnerable crates are flagged and patched. |
-| Secret scanning and push protection | On (automatic for public repositories) | A token committed by mistake is blocked or flagged. |
+| Secret scanning and push protection | On (free for public repositories, but off until enabled) | A token committed by mistake is blocked or flagged. |
 | Wiki, Projects | Off | Documentation lives in the repository; issues are the to-do list. |
 | Labels | `bug`, `analysis`, `enhancement`, `game-profile`, `needs-info`, `good first issue` | Used by the issue templates and CONTRIBUTING.md. |
 
