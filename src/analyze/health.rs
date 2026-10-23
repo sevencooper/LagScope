@@ -65,9 +65,10 @@ fn short(name: &str) -> &str {
 /// Fills in the PC-side findings and suggestions; returns their status for the scorecard.
 pub fn system_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>) -> Checks {
     let mut c = Checks::default();
+    // Memory first: the background check refers to it.
+    memory(d, r, f, rec, &mut c);
     background(d, r, f, rec, &mut c);
     cpu_limits(d, r, f, rec, &mut c);
-    memory(d, r, f, rec, &mut c);
     setup(d, r, f, rec, &mut c);
     link(d, r, f, rec, &mut c);
     software(d, f);
@@ -136,8 +137,8 @@ fn background(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>
             let mut advice = explain(name).map(String::from).unwrap_or_else(|| format!("{} was busy during the stutters: close it while playing and see if the stutter goes away.", short(name)));
             // Windows' memory manager runs as "System": with memory nearly full, that is the
             // likelier reason.
-            if name == "System" && d.cpu.iter().filter_map(|x| x.commit_pct).fold(0.0, f64::max) >= 90.0 {
-                advice.push_str(" Here RAM + page file were nearly full, which keeps Windows' memory management busy: freeing memory (see the Memory row) is the first thing to try.");
+            if name == "System" && c.memory.as_ref().is_some_and(|m| m.0) {
+                advice.push_str(" RAM was also running low, which keeps Windows' memory management busy: freeing memory may be the first thing to try.");
             }
             rec.push(advice);
             c.cpu.push(format!("{} busy during {n} hitches", short(name)));
@@ -191,26 +192,26 @@ fn memory(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>, c:
     let commit = d.cpu.iter().filter_map(|x| x.commit_pct).fold(0.0, f64::max);
     let of = if total > 0.0 { format!(" of {:.0} GB", total / 1024.0) } else { String::new() };
     let low_ram = low < 1024.0f64.max(total * 0.08) || paging >= 3;
-    // The commit limit (RAM + page file) can run out while RAM still looks free.
-    let commit_full = commit >= 90.0;
     f.push(format!(
-        "Memory: lowest free RAM while playing {:.1} GB{of}{}{}.",
+        "Memory: lowest free RAM while playing {:.1} GB{of}{}.",
         low / 1024.0,
-        if commit >= 80.0 { format!(", up to {commit:.0}% of the commit limit (RAM + page file) in use") } else { String::new() },
         if paging > 0 { format!(", {paging} moments of heavy paging to disk") } else { String::new() }
     ));
-    if low_ram {
-        rec.push(format!(
-            "RAM ran low while playing: close browsers and other heavy programs before a match{}.",
-            if total > 0.0 && total < 15_000.0 { "; 16 GB or more is recommended for current games" } else { "" }
-        ));
-    } else if commit_full {
-        rec.push(format!(
-            "Programs reserved {commit:.0}% of what Windows can hand out (RAM + page file), even though RAM itself was not full. When that limit is reached, Windows must grow the page file or programs crash. Close browsers and other heavy programs while playing, and keep the page file on \"System managed\" (Settings > System > About > Advanced system settings > Performance > Settings > Advanced > Virtual memory)."
+    // "Committed" memory is what programs reserved (RAM + page file), mostly never used; it
+    // runs far above the RAM in use that Task Manager shows. Only RAM actually running out
+    // makes games stutter, so a high value here is a note, not a problem.
+    if commit >= 90.0 && !low_ram {
+        f.push(format!(
+            "Programs had reserved up to {commit:.0}% of RAM + page file (Windows' \"committed\" memory, not the RAM in use that Task Manager shows). Windows enlarges the page file if it reaches 100%; with enough free RAM, as here, this rarely affects games."
         ));
     }
-    let text = if commit_full && !low_ram { format!("{commit:.0}% of the commit limit in use (RAM + page file)") } else { format!("lowest free {:.1} GB{of}", low / 1024.0) };
-    c.memory = Some((low_ram || commit_full, text));
+    if low_ram {
+        rec.push(format!(
+            "RAM ran low while playing: closing browsers and other heavy programs before a match may help{}.",
+            if total > 0.0 && total < 15_000.0 { "; 16 GB or more is recommended for current games" } else { "" }
+        ));
+    }
+    c.memory = Some((low_ram, format!("lowest free {:.1} GB{of}", low / 1024.0)));
 }
 
 /// Display refresh rate, power source and power plan.

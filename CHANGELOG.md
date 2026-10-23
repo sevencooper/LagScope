@@ -6,6 +6,13 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+- **Calmer advice:** "What to try" only lists things this recording points to, with a note
+  that none is guaranteed to help. High "committed" memory (reserved, not in use; Task
+  Manager shows RAM in use instead) is now a note rather than a warning; the Memory line warns
+  only when RAM itself runs low. Background recording, driver age, VPN software (unless the
+  network misbehaved) and similar general tips moved to Details. The "other programs moving
+  data" tip needs at least three game stalls and names only programs busy around them.
+
 ## 0.5.0 (2026-10-23)
 
 - **Upload freezes:** when the PC's uploads freeze while the game's data keeps arriving
