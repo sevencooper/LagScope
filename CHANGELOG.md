@@ -6,7 +6,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
-- **Updated the window toolkit** (egui / eframe 0.37).
+## 0.5.0 (2026-10-23)
+
 - **Upload freezes:** when the PC's uploads freeze while the game's data keeps arriving
   (which feels like rubber-banding or being pulled back), the report now says so, counts
   them on the Wi-Fi / network line and explains marked spikes with it. Freezes that start at
@@ -19,6 +20,7 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
   otherwise, and "System" (Windows itself) gets advice that makes sense; a laptop GPU at its
   normal temperature target is no longer flagged; long fake "periods" (e.g. every 162 s) are
   no longer reported.
+- **Updated the window toolkit** (egui / eframe 0.37).
 
 ## 0.4.6 (2026-10-22)
 
