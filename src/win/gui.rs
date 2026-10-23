@@ -1114,7 +1114,7 @@ impl GuiApp {
                 });
                 ui.add(egui::Label::new(RichText::new(&r.headline).color(headline_color(ui, &r.headline))).wrap());
                 if !r.warn.is_empty() {
-                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).small().color(Color32::from_rgb(235, 185, 90)));
+                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).size(12.5).color(Color32::from_rgb(235, 185, 90)));
                 }
             });
         }
@@ -1210,7 +1210,7 @@ impl GuiApp {
             let seen = *st.q_seen.get_or_insert_with(|| {
                 st.shots.push(format!("q{}", st.shots.len()));
                 let name = st.shots.last().unwrap().clone();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(name)));
+                save_screenshot(ctx, &st.out, name);
                 t
             });
             if t > seen + 2.0 {
@@ -1222,7 +1222,7 @@ impl GuiApp {
         }
         let shot = |ctx: &egui::Context, st: &mut SelfTest, name: &str| {
             st.shots.push(name.to_string());
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(name.to_string())));
+            save_screenshot(ctx, &st.out, name.to_string());
         };
         let done = matches!(self.shared.lock().unwrap().task, Task::Done(_) | Task::Failed(_));
         let scenario = st.scenario.clone();
@@ -1447,19 +1447,6 @@ impl GuiApp {
         // Keep the script ticking at the GUI's own busy rate, so measurements stay honest.
         ctx.request_repaint_after(Duration::from_secs(1));
     }
-
-    fn save_screenshots(&mut self, ctx: &egui::Context) {
-        let Some(st) = self.selftest.as_ref() else { return };
-        let out = st.out.clone();
-        ctx.input(|i| {
-            for e in &i.raw.events {
-                if let egui::Event::Screenshot { user_data, image, .. } = e {
-                    let name = user_data.data.as_ref().and_then(|d| d.downcast_ref::<String>()).cloned().unwrap_or_else(|| "shot".into());
-                    let _ = write_bmp(&out.join(format!("{name}.bmp")), image);
-                }
-            }
-        });
-    }
 }
 
 impl eframe::App for GuiApp {
@@ -1471,7 +1458,6 @@ impl eframe::App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.save_screenshots(&ctx);
 
         let busy = self.shared.lock().unwrap().task.busy();
 
@@ -1536,6 +1522,14 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Green for a clean result, amber when the report found something.
+/// Self-test: saves a screenshot of the window as `<out>/<name>.bmp` once it is rendered.
+fn save_screenshot(ctx: &egui::Context, out: &std::path::Path, name: String) {
+    let path = out.join(format!("{name}.bmp"));
+    ctx.request_screenshot(move |image| {
+        let _ = write_bmp(&path, &image);
+    });
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Share {
     Summary,

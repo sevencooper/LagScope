@@ -6,6 +6,7 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+- **Updated the window toolkit** (egui / eframe 0.37).
 - **Upload freezes:** when the PC's uploads freeze while the game's data keeps arriving
   (which feels like rubber-banding or being pulled back), the report now says so, counts
   them on the Wi-Fi / network line and explains marked spikes with it. Freezes that start at
