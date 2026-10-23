@@ -313,6 +313,33 @@ mod tests {
     }
 
     #[test]
+    fn upload_freezes_on_a_second_timer() {
+        // Every 10 s at x.88 the router (and everything behind it) answers 220 ms late, while
+        // the game's incoming stream keeps flowing: the PC's uploads are held back. One mark
+        // right after a freeze, one while switched away from the game.
+        let mut s = Synth::new("upload");
+        let frozen = |t: i64| t > 10_000_000 && (t - 880_000).rem_euclid(10_000_000) < 50_000;
+        s.fill(120, |_| false, |t| if frozen(t) { 220_000 } else { 2_000 }, |_| false);
+        writeln!(s.marks, "61300000,hotkey,1").unwrap();
+        writeln!(s.marks, "96000000,hotkey,2").unwrap();
+        s.write();
+        std::fs::write(s.dir.join("focus.csv"), "t_us,game,process\n0,1,game.exe\n94000000,0,explorer.exe\n97000000,1,game.exe\n").unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        let ups = a.anomalies.iter().filter(|x| x.kind == Kind::UploadStall).count();
+        assert!(ups >= 9, "upload freezes: {ups}");
+        assert_eq!(a.stream.gaps_100ms, 0);
+        assert!(a.second_timer.is_some_and(|(k, n)| k * 10 >= n * 9), "{:?}", a.second_timer);
+        assert_eq!(a.verdicts[0].category, "wifi", "{:#?}", a.verdicts[0]);
+        assert!(a.verdicts[0].culprit.contains("uploads froze"), "{}", a.verdicts[0].culprit);
+        assert_eq!(a.verdicts[1].category, "away");
+        assert!(a.headline.starts_with("1 of 1 marked") && a.headline.contains("1 more marked while switched away"), "{}", a.headline);
+        assert!(a.health[0].text.contains("upload freezes"), "{:?}", a.health[0]);
+        assert!(a.findings.iter().any(|f| f.contains("1-second timer")));
+        // The 10 s beat itself is found, not a multiple of it.
+        assert!(a.periodicity.iter().all(|p| (p.period_s - 10.0).abs() < 0.5), "{:?}", a.periodicity);
+    }
+
+    #[test]
     fn alt_tab_hitches_are_not_counted() {
         // 200 ms frame holes every 20 s; the ones at 40 s and 80 s are alt-tabs.
         let mut s = Synth::new("alttab");

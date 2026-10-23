@@ -140,9 +140,38 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         }
     }
 
+    // Upload freezes: the game's data kept arriving, but the PC's own packets were held up.
+    let ups: Vec<f64> = r.anomalies.iter().filter(|a| a.kind == Kind::UploadStall && a.in_match).map(|a| a.value).collect();
+    let up_ms = {
+        let mut v = ups.clone();
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    let play_min_all = ((if s.match_s > 0.0 { s.match_s } else { s.active_s }) / 60.0).max(1.0);
+    let upload_issue = ups.len() >= 3 && ups.len() as f64 / play_min_all >= 0.3;
+    if !ups.is_empty() {
+        f.push(format!(
+            "{} time(s) during play the PC's uploads froze for about {up_ms:.0} ms while the game's incoming data kept arriving (pings to the router and beyond stalled together). Each time, your movement and shots reached the server late, which feels like rubber-banding or being pulled back.",
+            ups.len()
+        ));
+    }
+    if let Some((k, n)) = r.second_timer {
+        f.push(format!(
+            "{k} of {n} router freezes started at the same point within a second: something on a 1-second timer sets them off (typically the router or the network adapter's firmware). Interference or a weak signal would hit at random moments."
+        ));
+    }
+    // The general Wi-Fi advice above already covers an unstable router hop.
+    if upload_issue && is_wifi && !gw_unstable {
+        rec.push(format!(
+            "The PC's uploads keep freezing for ~{up_ms:.0} ms on the Wi-Fi ({} times). Test with an Ethernet cable if you can; otherwise try the router's other band, update the Wi-Fi driver from the PC or chipset maker, and restart the router.",
+            ups.len()
+        ));
+    }
+
     if let Some(gc) = r.gateway_spike_correlation.get("game inbound gap") {
         let n = r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike && a.value >= 30.0).count();
-        if n >= 3 && *gc < 0.2 {
+        // With upload freezes found, the upload side is covered by their own finding.
+        if n >= 3 && *gc < 0.2 && ups.is_empty() {
             f.push(format!(
                 "{n} router-ping spikes ≥30 ms, but only {} of them coincided with a gap in the server → you game stream, so the download direction was unaffected. (Delays in your upload direction cannot be seen from the PC.)",
                 pct(*gc)
@@ -263,7 +292,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     checks.drivers = drivers;
     checks.disk = disk;
     if count(Kind::GpuLimit) > 0 {
-        f.push(format!("The GPU hit heat / hardware slowdown limits {}× during the session.", count(Kind::GpuLimit)));
+        f.push(format!("The GPU's clocks were held back by heat or a power brake {:.0}% of the time while playing.", super::health::gpu_limit_share(d, r) * 100.0));
         if super::health::gpu_limited(d, r) {
             rec.push(if super::hardware::is_laptop(d) {
                 "The graphics card kept slowing down from heat: raise the laptop's back for airflow, clean its vents, use its performance / fan mode, or cap the frame rate a little below the screen's refresh rate."
@@ -278,8 +307,8 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if !r.away.is_empty() {
         let secs: f64 = r.away.iter().map(|(a, b)| (b - a) as f64 / 1e6).sum();
         f.push(format!(
-            "You switched away from the game {} time(s) (alt-tab or another window, about {secs:.0} s in total): frames around those moments are not judged.",
-            r.away.len()
+            "You switched away from the game {} time(s) (alt-tab or another window, about {secs:.0} s in total with the moments around it): frames then are not judged.",
+            r.away_switches.max(r.away.len())
         ));
     }
     let ignored = r.anomalies.iter().filter(|a| !a.in_match && matches!(a.kind, Kind::InGap | Kind::FrameHitch)).count();
@@ -329,16 +358,23 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
 
     // Headline from mark verdicts, else from correlations.
+    // Marks made while switched away from the game say nothing about the game.
     let mut cats: BTreeMap<&str, usize> = BTreeMap::new();
-    for v in &r.verdicts {
+    for v in r.verdicts.iter().filter(|v| v.category != "away") {
         *cats.entry(v.category).or_default() += 1;
     }
+    let judged = r.verdicts.iter().filter(|v| v.category != "away").count();
+    let away_marks = r.verdicts.len() - judged;
     let headline = if let Some(c) = check_headline {
         c
     } else if let Some(c) = clockwork {
         c
     } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
-        format!("{n} of {} marked spikes point to: {}", r.verdicts.len(), category_text(cat))
+        format!(
+            "{n} of {judged} marked spikes point to: {}{}",
+            category_text(cat),
+            if away_marks > 0 { format!(" ({away_marks} more marked while switched away from the game)") } else { String::new() }
+        )
     } else if s.gaps_100ms >= 3 && s.gaps_100ms as f64 / ((if s.match_s > 0.0 { s.match_s } else { s.active_s }) / 60.0).max(1.0) >= 0.3 {
         let gwc = r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0);
         let fc = r.gap_correlation.get("frame hitch").copied().unwrap_or(0.0);
@@ -349,6 +385,8 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         } else {
             "Game stalls occur while your own network looks clean: path to / the game server itself".into()
         }
+    } else if upload_issue {
+        format!("Your uploads froze {} times (~{up_ms:.0} ms each) while the game's data kept arriving: {}", ups.len(), category_text(if is_wifi { "wifi" } else { "lan" }))
     } else if s.gaps_100ms > 0 {
         format!("No significant problems: only {} brief game-stream stall(s) in the whole session.", s.gaps_100ms)
     } else {
@@ -358,7 +396,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if !r.verdicts.is_empty() || s.gaps_100ms > 0 {
         rec.push("Compare with a control session: record a game that feels fine (pick it on the Record tab, or use Auto-detect) and compare the two reports.".into());
     }
-    if !is_wifi && (gw_unstable || headline.contains("link to the router")) {
+    if !is_wifi && (gw_unstable || upload_issue || headline.contains("link to the router")) {
         rec.insert(0, "The link between the PC and the router is what stalls. If the PC connects through a powerline adapter, a mesh node or a switch, test with a cable straight to the router; otherwise try another cable and router port, update the network adapter's driver, and restart the router.".into());
     }
     let network_issue = headline.contains("Wi-Fi") || headline.contains("router") || headline.contains("network hop") || r.wifi_check.as_ref().is_some_and(|o| o.problem);

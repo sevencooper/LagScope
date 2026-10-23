@@ -112,8 +112,9 @@ pub fn start(app: Arc<App>) -> Running {
         while a.sleep_ms(1000) {
             let list = processes(&mut buf);
             let map: HashMap<u32, String> = list.iter().map(|p| (p.pid, p.name.clone())).collect();
+            // Update first: on exit it still knows the auto-detected game's name.
+            update(&a, map.clone(), false);
             auto_detect(&a, &map, &mut streak);
-            update(&a, map, false);
             cpu.sample(&a, list);
             env.sample(&a);
         }

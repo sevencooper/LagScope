@@ -26,7 +26,7 @@ Read these small files first; they hold LagScope's own conclusions:
 | File | What it is |
 |---|---|
 | `meta.json` | Session facts: tool version, game profile, connection (`route`: adapter, `is_wifi`, gateway, link speed), hardware snapshot (`hardware`, `displays`, `nvidia`, `ram_mb`, `logical_cpus`), power state, router identification, collector problems, LagScope's own CPU use. |
-| `analysis.json` | LagScope's analysis: `headline`, `health` (scorecard: area, status ok/warn/na, text), `findings`, `recommendations`, `verdicts` (one per lag spike the user marked: culprit, category, confidence, evidence), `anomalies` (every detected event, see below), correlations, `periodicity`, `frames` and `stream` statistics, `phases` (match play) and `away` (times the game was not in front). |
+| `analysis.json` | LagScope's analysis: `headline`, `health` (scorecard: area, status ok/warn/na, text), `findings`, `recommendations`, `verdicts` (one per lag spike the user marked: culprit, category, confidence, evidence; category `away` = marked while switched away from the game), `anomalies` (every detected event, see below), correlations, `periodicity`, `second_timer` (router freezes starting at the same point within a second: [that many, of all]), `frames` and `stream` statistics, `phases` (match play; the first 5 s of each are not judged for frames) and `away` (times the game was not in front) with `away_switches`. |
 | `events.csv` | Timeline in words: collectors starting, game start/exit, server detected, route, marks, Wi-Fi events, power and link changes. |
 | `marks.csv` | When the user pressed the lag-spike key: `t_us,source,n`. People press 0.5-3 s after they notice; look at the seconds **before** each mark. |
 | `report.html` | The same analysis as an interactive page (charts); open it in a browser. |
@@ -51,6 +51,7 @@ events are shown but not counted. Kinds:
 | GpuLimit | NVIDIA GPU clocks limited by heat / power brake, °C |
 | Paging | heavy paging while RAM was low |
 | GameBurst | the game pinged all its regions at once (hundreds of tiny packets) |
+| UploadStall | the path through the router froze (router and farther pings stalled together) while the game's incoming stream kept arriving: the PC's own packets were held back, ms |
 
 ## Network
 
