@@ -6,6 +6,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+## 0.4.6 (2026-10-22)
+
 - **AI analysis:** every recording now contains `AI_GUIDE.md`, which explains every file
   and column to an AI assistant. "Copy AI prompt" (result screen, Reports > More) copies a
   ready-made prompt to paste into ChatGPT, Claude or similar together with the zip.
