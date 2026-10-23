@@ -137,7 +137,7 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     v[((v.len() - 1) as f64 * p).round() as usize]
 }
 

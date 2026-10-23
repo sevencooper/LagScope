@@ -341,7 +341,7 @@ fn base_median(samples: &[(i64, Option<f64>)], windows: &[Window]) -> f64 {
         // First baseline still running: use what we have so far.
         v = samples.iter().filter_map(|(_, r)| *r).collect();
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     crate::analyze::detect::percentile(&v, 0.5)
 }
 

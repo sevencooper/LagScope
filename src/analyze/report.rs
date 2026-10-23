@@ -172,6 +172,12 @@ fn series(d: &Data, a: &Analysis) -> Value {
             max_into(&mut gpupow, i, x);
         }
     }
+    // AMD / Intel graphics: busiest engine from Windows' counters.
+    if d.gpu.is_empty() {
+        for &(t, busy, _) in &d.gpu_engines {
+            max_into(&mut gpu, b.idx(t), busy);
+        }
+    }
     let game = d.game_pids();
     let mut other = empty();
     let mut per_sec: BTreeMap<i64, u64> = BTreeMap::new();
@@ -212,7 +218,7 @@ pub fn render(d: &Data, a: &Analysis) -> String {
     // Keep the anomaly list bounded for very long/noisy sessions.
     let mut anomalies: Vec<&super::detect::Anomaly> = a.anomalies.iter().collect();
     if anomalies.len() > 5000 {
-        anomalies.sort_by(|x, y| y.value.partial_cmp(&x.value).unwrap());
+        anomalies.sort_by(|x, y| y.value.total_cmp(&x.value));
         anomalies.truncate(5000);
         anomalies.sort_by_key(|x| x.t);
     }

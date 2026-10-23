@@ -200,7 +200,7 @@ $dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Win
 [ordered]@{
  pc_type = [int]$cs.PCSystemType
  bios_date = Day (Get-CimInstance Win32_BIOS).ReleaseDate
- memory = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [ordered]@{ gb = [math]::Round($_.Capacity / 1GB); speed = [int]$_.Speed; configured = [int]$_.ConfiguredClockSpeed; type = [int]$_.SMBIOSMemoryType; maker = "$($_.Manufacturer)".Trim(); part = "$($_.PartNumber)".Trim(); slot = "$($_.DeviceLocator)".Trim() } })
+ memory = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [ordered]@{ gb = [math]::Round($_.Capacity / 1GB); speed = [int]$_.Speed; configured = [int]$_.ConfiguredClockSpeed; type = [int]$_.SMBIOSMemoryType; maker = "$($_.Manufacturer)".Trim(); part = "$($_.PartNumber)".Trim(); slot = "$($_.DeviceLocator)".Trim(); bank = "$($_.BankLabel)".Trim() } })
  gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { [ordered]@{ name = $_.Name; driver = $_.DriverVersion; driver_date = Day $_.DriverDate } })
  disks = @(Get-PhysicalDisk | ForEach-Object { [ordered]@{ name = $_.FriendlyName; media = "$($_.MediaType)"; bus = "$($_.BusType)"; gb = [math]::Round($_.Size / 1GB); letters = @(Get-Partition -DiskNumber $_.DeviceId | Where-Object { "$($_.DriveLetter)" -match '^[A-Z]$' } | ForEach-Object { "$($_.DriveLetter)" }) } })
  system_drive = [ordered]@{ letter = $sys; free_gb = [math]::Round($vol.SizeRemaining / 1GB, 1); size_gb = [math]::Round($vol.Size / 1GB) }
@@ -216,6 +216,18 @@ pub fn start(app: Arc<App>) -> Running {
         quick_facts(&a);
         let long = Duration::from_secs(60);
         let short = Duration::from_secs(15);
+        // First: it is quick, and short recordings should still get the hardware checks.
+        let hw = run(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &super::fixes::encode_command(HW_SCRIPT)],
+            None,
+            long,
+        );
+        // stdout only (`run` appends any stderr after a marker).
+        match serde_json::from_str::<serde_json::Value>(hw.split("\n--- stderr ---").next().unwrap_or("").trim()) {
+            Ok(v) => a.session.meta_set("hardware", v),
+            Err(_) => a.session.event("collector", format!("sysinfo: hardware query failed: {}", hw.trim().chars().take(200).collect::<String>())),
+        }
         let jobs: Vec<(&str, &str, Vec<&str>)> = vec![
             ("sysinfo/netsh_wlan_interfaces.txt", "netsh.exe", vec!["wlan", "show", "interfaces"]),
             ("sysinfo/netsh_wlan_drivers.txt", "netsh.exe", vec!["wlan", "show", "drivers"]),
@@ -248,19 +260,6 @@ pub fn start(app: Arc<App>) -> Running {
             long,
         );
         a.session.write_text("sysinfo/system.txt", &redact(&ps));
-        if a.stopping() {
-            return;
-        }
-        let hw = run(
-            "WindowsPowerShell\\v1.0\\powershell.exe",
-            &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &super::fixes::encode_command(HW_SCRIPT)],
-            None,
-            short,
-        );
-        match serde_json::from_str::<serde_json::Value>(hw.trim()) {
-            Ok(v) => a.session.meta_set("hardware", v),
-            Err(_) => a.session.event("collector", format!("sysinfo: hardware query failed: {}", hw.trim().chars().take(200).collect::<String>())),
-        }
         power_plan(&a);
         summarize_wlan(&a);
         // Router / ISP identification (local network only, plus one reverse DNS lookup).

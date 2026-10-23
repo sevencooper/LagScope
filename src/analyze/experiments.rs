@@ -66,7 +66,7 @@ pub fn stats(samples: &[(i64, Option<f64>)], w: &Window, thr: f64) -> WindowStat
     let inside: Vec<&(i64, Option<f64>)> = samples.iter().filter(|(t, _)| *t >= w.start && *t < w.end).collect();
     let ok: Vec<f64> = {
         let mut v: Vec<f64> = inside.iter().filter_map(|(_, r)| *r).collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         v
     };
     let mut spikes = 0;
@@ -104,7 +104,7 @@ pub fn evaluate(samples: &[(i64, Option<f64>)], windows: &[Window]) -> Outcome {
         .filter(|(t, _)| windows.iter().any(|w| is_baseline(&w.key) && *t >= w.start && *t < w.end))
         .filter_map(|(_, r)| *r)
         .collect();
-    base.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    base.sort_by(|a, b| a.total_cmp(b));
     let thr = threshold(percentile(&base, 0.5));
     let mut ws: Vec<WindowStats> = windows.iter().map(|w| stats(samples, w, thr)).collect();
     let bases: Vec<&WindowStats> = ws.iter().filter(|s| is_baseline(&s.key)).collect();

@@ -135,7 +135,7 @@ mod tests {
         assert!(a.stream.gaps_100ms >= 4, "gaps: {}", a.stream.gaps_100ms);
         assert!(a.stream.burst_gaps >= 4, "delayed packets should be detected as bursts");
         assert!(a.verdicts.iter().all(|v| v.category == "wifi"), "{:#?}", a.verdicts);
-        assert!(a.gap_correlation["gateway (Wi-Fi hop) spike/loss"] > 0.9);
+        assert!(a.gap_correlation[super::detect::GW_KEY] > 0.9);
         let p = a.periodicity.iter().find(|p| p.what.contains("inbound")).expect("periodicity");
         assert!((p.period_s - 60.0).abs() < 1.5, "period {}", p.period_s);
         assert!(a.headline.contains("Wi-Fi"), "{}", a.headline);
@@ -284,15 +284,58 @@ mod tests {
     }
 
     #[test]
+    fn wired_pc_is_not_blamed_on_wifi() {
+        // The same 60 s router freezes as above, on a cable, with an idle Wi-Fi adapter
+        // scanning at those moments and a second router in front of the PC's.
+        let mut s = Synth::new("wired");
+        let hole = |t: i64| t > 20_000_000 && (t - 30_000_000).rem_euclid(60_000_000) < 250_000;
+        s.fill(300, hole, |t| if hole(t) { 180_000 } else { 2_000 }, |_| false);
+        for k in 0..5 {
+            let t = 30_000_000 + k * 60_000_000;
+            writeln!(s.wlan, "{},autoconfig,20024,Number of Unique Wlan Networks,Count=12", t - 400_000).unwrap();
+            writeln!(s.marks, "{},hotkey,{}", t + 1_200_000, k + 1).unwrap();
+        }
+        s.write();
+        std::fs::write(
+            s.dir.join("meta.json"),
+            r#"{"route":{"is_wifi":false},"config":{"processes":["Discovery.exe"]},"elevated":true,"logical_cpus":32,"inner_routers":["10.0.0.1"]}"#,
+        )
+        .unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert!(a.verdicts.iter().all(|v| v.category == "lan"), "{:#?}", a.verdicts);
+        assert!(!a.anomalies.iter().any(|x| x.kind == Kind::WifiScan));
+        assert!(!a.headline.contains("Wi-Fi"), "{}", a.headline);
+        assert!(a.recommendations.iter().any(|r| r.contains("powerline")), "{:#?}", a.recommendations);
+        assert!(a.findings.iter().any(|f| f.contains("double NAT")));
+        assert_eq!(a.health[0].area, "Network link");
+    }
+
+    #[test]
+    fn alt_tab_hitches_are_not_counted() {
+        // 200 ms frame holes every 20 s; the ones at 40 s and 80 s are alt-tabs.
+        let mut s = Synth::new("alttab");
+        let hole = |t: i64| t > 10_000_000 && (t - 20_000_000).rem_euclid(20_000_000) < 200_000;
+        s.fill(120, |_| false, |_| 2_000, hole);
+        s.write();
+        std::fs::write(s.dir.join("focus.csv"), "t_us,game,process\n0,1,Discovery.exe\n40000000,0,Discord.exe\n45000000,1,Discovery.exe\n80100000,0,explorer.exe\n81000000,1,Discovery.exe\n").unwrap();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert_eq!(a.away.len(), 2);
+        let counted: Vec<i64> = a.anomalies.iter().filter(|x| x.kind == Kind::FrameHitch && x.in_match).map(|x| x.t / 1_000_000).collect();
+        // A hitch is stamped at the last frame before the hole (19.99 s etc.).
+        assert_eq!(counted, vec![19, 59, 99], "{counted:?}");
+        assert!(a.findings.iter().any(|f| f.contains("switched away from the game 2 time")));
+    }
+
+    #[test]
     fn hardware_setup() {
         let mut s = Synth::new("hw");
         s.fill(60, |_| false, |_| 2_000, |_| false);
         s.write();
         // A desktop with one 6000-rated stick at 4800, the monitor on the integrated graphics,
-        // the card at x8 with a lowered power limit, a full C: and the CPU capped at 80%.
+        // the card at PCIe 3.0 x8 with a lowered power limit, a full C: and the CPU capped at 80%.
         let mut gpu = String::from("t_us,gpu,util_pct,power_limit_w,pcie_gen,pcie_width\n");
         for q in 0..60i64 {
-            writeln!(gpu, "{},0,90,250,4,8", q * 1_000_000).unwrap();
+            writeln!(gpu, "{},0,90,250,3,8", q * 1_000_000).unwrap();
         }
         std::fs::write(s.dir.join("gpu.csv"), gpu).unwrap();
         std::fs::create_dir_all(s.dir.join("sysinfo")).unwrap();
@@ -316,7 +359,7 @@ mod tests {
         .unwrap();
         let a = analyze(&load::load(&s.dir).unwrap());
         let rec = a.recommendations.join("\n");
-        for k in ["XMP", "single-channel", "plugged into the motherboard", "8 PCIe lanes", "power limit", "only 6 GB free", "Maximum processor state", "over a year old", "Game Bar"] {
+        for k in ["XMP", "single-channel", "plugged into the motherboard", "PCIe 3.0 x8", "power limit", "only 6 GB free", "Maximum processor state", "over a year old", "Game Bar"] {
             assert!(rec.contains(k), "{k}: {rec}");
         }
         assert!(a.findings.iter().any(|f| f.contains("hard disk is installed (D:)")), "{:#?}", a.findings);

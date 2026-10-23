@@ -21,10 +21,6 @@ The coloured line at the top is the verdict. Under it, one dot per area
 hardware setup):
 green is fine, amber is worth a look. "What to try" lists the next steps.
 
-Tip: tick "Record automatically when I play ..." and LagScope waits in the tray
-(next to the clock) and makes a report after every game. Closing the window keeps
-it there; right-click the tray icon to exit.
-
 
 Other tabs
 ----------
@@ -74,4 +70,3 @@ Command line (optional; lagscope.exe --help lists everything)
   lagscope.exe load-test          busy-connection (bufferbloat) test
   lagscope.exe wifi-scan          nearby Wi-Fi
   lagscope.exe router             router / provider identification
-  lagscope.exe startup on|off     start hidden in the tray with Windows

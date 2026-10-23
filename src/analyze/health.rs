@@ -87,7 +87,7 @@ fn background(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>
         }
     }
     let mut avg: Vec<(String, f64, f64)> = sum.into_iter().map(|(n, (s, m))| (n.to_string(), if play_s > 0.0 { s / play_s } else { 0.0 }, m)).collect();
-    avg.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    avg.sort_by(|a, b| b.1.total_cmp(&a.1));
     avg.truncate(5);
     c.background = avg.clone();
 
@@ -141,12 +141,11 @@ fn cpu_limits(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>
     if limited >= 0.2 {
         let typical = percentile(&{
             let mut v: Vec<f64> = rows.iter().copied().filter(|&p| p >= 15.0).collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v.sort_by(|a, b| a.total_cmp(b));
             v
         }, 0.5);
         f.push(format!("The CPU was held back by power or heat limits {:.0}% of the time (typically {typical:.0}% below its full speed).", limited * 100.0));
-        let laptop = d.meta["power"]["has_battery"].as_bool() == Some(true);
-        rec.push(if laptop {
+        rec.push(if super::hardware::is_laptop(d) {
             "The CPU was throttled: keep the laptop plugged in, use the Best performance power mode, raise it for airflow and clean its vents."
         } else {
             "The CPU was throttled: check that the CPU cooler is seated and its fan spins up, and that the power plan is not Power saver."
@@ -161,26 +160,33 @@ fn memory(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>, c:
     if avail.len() < 20 {
         return;
     }
-    avail.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    avail.sort_by(|a, b| a.total_cmp(b));
     let low = percentile(&avail, 0.02);
     let total = d.meta["ram_mb"].as_f64().unwrap_or(0.0);
     let paging = r.anomalies.iter().filter(|a| a.kind == Kind::Paging).count();
     let commit = d.cpu.iter().filter_map(|x| x.commit_pct).fold(0.0, f64::max);
     let of = if total > 0.0 { format!(" of {:.0} GB", total / 1024.0) } else { String::new() };
-    let tight = low < 1024.0f64.max(total * 0.08) || paging >= 3 || commit >= 90.0;
+    let low_ram = low < 1024.0f64.max(total * 0.08) || paging >= 3;
+    // The commit limit (RAM + page file) can run out while RAM still looks free.
+    let commit_full = commit >= 90.0;
     f.push(format!(
         "Memory: lowest free RAM while playing {:.1} GB{of}{}{}.",
         low / 1024.0,
-        if commit >= 80.0 { format!(", up to {commit:.0}% of the commit limit in use") } else { String::new() },
+        if commit >= 80.0 { format!(", up to {commit:.0}% of the commit limit (RAM + page file) in use") } else { String::new() },
         if paging > 0 { format!(", {paging} moments of heavy paging to disk") } else { String::new() }
     ));
-    if tight {
+    if low_ram {
         rec.push(format!(
             "RAM ran low while playing: close browsers and other heavy programs before a match{}.",
             if total > 0.0 && total < 15_000.0 { "; 16 GB or more is recommended for current games" } else { "" }
         ));
+    } else if commit_full {
+        rec.push(format!(
+            "Programs reserved {commit:.0}% of what Windows can hand out (RAM + page file), even though RAM itself was not full. When that limit is reached, Windows must grow the page file or programs crash. Close browsers and other heavy programs while playing, and keep the page file on \"System managed\" (Settings > System > About > Advanced system settings > Performance > Settings > Advanced > Virtual memory)."
+        ));
     }
-    c.memory = Some((tight, format!("lowest free {:.1} GB{of}", low / 1024.0)));
+    let text = if commit_full && !low_ram { format!("{commit:.0}% of the commit limit in use (RAM + page file)") } else { format!("lowest free {:.1} GB{of}", low / 1024.0) };
+    c.memory = Some((low_ram || commit_full, text));
 }
 
 /// Display refresh rate, power source and power plan.
@@ -189,7 +195,10 @@ fn setup(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>, c: 
         for m in ds {
             let (hz, max) = (m["hz"].as_u64().unwrap_or(0), m["max_hz"].as_u64().unwrap_or(0));
             let name = m["monitor"].as_str().filter(|s| !s.is_empty() && !s.starts_with("Generic")).map(|s| format!(" ({s})")).unwrap_or_default();
-            if max > hz + 4 && hz > 0 {
+            if max > hz + 4 && hz > 0 && m["primary"].as_bool() != Some(true) {
+                // A second screen at a low rate is usually on purpose.
+                f.push(format!("A second monitor{name} runs at {hz} Hz but supports {max} Hz."));
+            } else if max > hz + 4 && hz > 0 {
                 f.push(format!("A monitor{name} runs at {hz} Hz but supports {max} Hz."));
                 rec.push(format!("Your monitor is set to {hz} Hz but can do {max} Hz: Settings > System > Display > Advanced display > Choose a refresh rate."));
                 c.setup.push(format!("monitor at {hz} of {max} Hz"));
@@ -246,6 +255,13 @@ fn link(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<String>, c: &
                 c.link.push("100 Mbit/s link".into());
             }
         }
+    }
+    if let Some(inner) = d.meta["inner_routers"].as_array().filter(|v| !v.is_empty()) {
+        let ips: Vec<&str> = inner.iter().filter_map(|v| v.as_str()).collect();
+        f.push(format!(
+            "After your router, traffic passes another private address ({}): usually a second router in front of yours (double NAT). That does not cause lag by itself, but some games then report a strict NAT type.",
+            ips.join(", ")
+        ));
     }
     let errors: u64 = d.link.iter().skip(1).map(|l| l.errors).sum();
     let discards: u64 = d.link.iter().skip(1).map(|l| l.discards).sum();
@@ -308,6 +324,14 @@ fn software(d: &Data, f: &mut Vec<String>) {
     }
 }
 
+/// GPU clock limits (heat / power brake) that matter: often (once a minute or more) or
+/// together with frame hitches. A few short ones are normal, especially on laptops.
+pub fn gpu_limited(d: &Data, r: &Analysis) -> bool {
+    let n = r.anomalies.iter().filter(|a| a.kind == Kind::GpuLimit).count();
+    let per_min = n as f64 / (d.duration_us as f64 / 60e6).max(1.0);
+    n > 0 && (per_min >= 1.0 || r.hitch_correlation.get("GPU limit / memory pressure").copied().unwrap_or(0.0) >= 0.3)
+}
+
 /// One line per area: OK, needs a look, or not measured.
 pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
     let is_wifi = d.meta["route"]["is_wifi"].as_bool().unwrap_or(false);
@@ -345,7 +369,7 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
         let mut bad = false;
         // Losses and stalls caused by the first hop belong to the Wi-Fi / link line.
         let gw_loss = r.probes.iter().find(|p| p.target == "gateway" && p.sent > 0).map(|g| g.lost as f64 * 100.0 / g.sent as f64).unwrap_or(0.0);
-        let first_hop = clockwork || r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0) >= 0.4;
+        let first_hop = clockwork || r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0) >= 0.4;
         if let Some(n) = net {
             let loss = n.lost as f64 * 100.0 / n.sent as f64;
             bad |= n.p99_ms > 100.0 || loss - gw_loss > 1.0;
@@ -401,11 +425,18 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
 
     // GPU.
     if d.gpu.is_empty() {
-        add("GPU", None, "no NVIDIA data".into());
+        // Other vendors: only how busy it was, from Windows' own counters.
+        let mut busy: Vec<f64> = d.gpu_engines.iter().filter(|x| in_play(r, x.0)).map(|x| if x.2 > 0.0 { x.2 } else { x.1 }).collect();
+        busy.sort_by(|a, b| a.total_cmp(b));
+        if busy.len() >= 10 {
+            add("GPU", Some(false), format!("{:.0}% busy (temperature and clock limits are only read on NVIDIA cards)", percentile(&busy, 0.5)));
+        } else {
+            add("GPU", None, "not measured".into());
+        }
     } else {
         let limits = r.anomalies.iter().filter(|a| a.kind == Kind::GpuLimit).count();
         let temp = d.gpu.iter().filter_map(|g| g.temp).fold(0.0, f64::max);
-        add("GPU", Some(limits > 0), if limits > 0 { format!("slowed down by heat/power {limits}×, up to {temp:.0} °C") } else { format!("no slowdowns, up to {temp:.0} °C") });
+        add("GPU", Some(gpu_limited(d, r)), if limits > 0 { format!("slowed down by heat/power {limits}×, up to {temp:.0} °C") } else { format!("no slowdowns, up to {temp:.0} °C") });
     }
 
     match &c.memory {

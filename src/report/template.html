@@ -227,7 +227,7 @@ if (S.region) pser.push({ label: "game region ping (UDP)", data: S.region, color
 chart("Ping round-trip time (max per interval)", pser, { unit: "ms", height: 200 });
 chart("Ping losses (count)", [{ label: "lost probes", data: lossSum, color: css("--bad"), points: true }], { height: 110 });
 chart("Frame time (worst per interval)", [{ label: "frame", data: S.frame, color: C(3), unit: " ms" }], { unit: "ms" });
-chart("Wi-Fi", [
+if (!(D.meta.route && D.meta.route.is_wifi === false)) chart("Wi-Fi", [
   { label: "link quality", data: S.quality, color: C(1), span: true },
   { label: "RSSI dBm", data: S.rssi, color: C(2) },
   { label: "TX rate Mbit/s", data: S.tx_rate, color: C(3) },

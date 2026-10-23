@@ -28,8 +28,6 @@ so lag spikes can be traced to their cause.
 USAGE:
     lagscope.exe                      the LagScope window (double-click)
     lagscope.exe --console            console menu: Wi-Fi check, record, undo
-    lagscope.exe --tray               start hidden in the tray with auto-record on
-    lagscope.exe startup <on|off>     start LagScope (tray, auto-record) at Windows logon
     lagscope.exe --wifi-check         Wi-Fi check & fix: test Wi-Fi settings one at a time
     lagscope.exe --record [OPTIONS]   record a session while playing
     lagscope.exe games                list the game profiles
@@ -174,6 +172,7 @@ fn undo() {
 }
 
 fn main() -> Result<()> {
+    session::install_panic_hook();
     #[cfg(windows)]
     win::harden_dll_search();
     #[cfg_attr(not(windows), allow(unused_mut))]
@@ -181,17 +180,13 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     {
         if args.is_empty() {
-            return win::gui::run(parse_config(&[])?, None, false);
+            return win::gui::run(parse_config(&[])?, None);
         }
         if args[0] == "--gui-selftest" {
             let scenario = args.get(1).cloned().unwrap_or_else(|| "idle".into());
             let out = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("lagscope_selftest"));
             let rest: Vec<String> = args.iter().skip(3).cloned().collect();
-            return win::gui::run(parse_config(&rest)?, Some((scenario, out)), false);
-        }
-        if args[0] == "--tray" {
-            // Started at logon: hidden in the tray with auto-record on.
-            return win::gui::run(parse_config(&args[1..])?, None, true);
+            return win::gui::run(parse_config(&rest)?, Some((scenario, out)));
         }
         win::console::ensure();
         if args[0] == "--console" {
@@ -231,16 +226,6 @@ fn main() -> Result<()> {
             let secs = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
             let max = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
             win::dump::run(kind, secs, max)
-        }
-        #[cfg(windows)]
-        Some("startup") => {
-            match args.get(1).map(String::as_str) {
-                Some("on") => win::gui::set_startup_task(true).map_err(|e| anyhow::anyhow!(e))?,
-                Some("off") => win::gui::set_startup_task(false).map_err(|e| anyhow::anyhow!(e))?,
-                _ => {}
-            }
-            println!("start with Windows (tray, auto-record): {}", if win::gui::startup_task_exists() { "on" } else { "off" });
-            Ok(())
         }
         #[cfg(windows)]
         Some("load-test") => {

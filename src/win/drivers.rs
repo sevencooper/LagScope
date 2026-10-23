@@ -307,7 +307,7 @@ pub fn start(app: Arc<App>) -> Result<Running> {
             let now = a.session.clock.now_us();
             let mut s = st.lock().unwrap();
             s.recent.retain(|(t, _, _)| now - t < 10_000_000);
-            let worst = s.recent.iter().copied().max_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+            let worst = s.recent.iter().copied().max_by(|x, y| x.1.total_cmp(&y.1));
             let known = s.modules.len();
             let disk = s.disk_last.filter(|d| now / 1_000_000 - d.0 <= 2);
             let txt = match worst {
@@ -351,7 +351,7 @@ pub fn start(app: Arc<App>) -> Result<Running> {
             .collect();
         rows.sort_by(|x, y| {
             let m = |v: &serde_json::Value| v["dpc_max_us"].as_f64().unwrap_or(0.0).max(v["isr_max_us"].as_f64().unwrap_or(0.0));
-            m(y).partial_cmp(&m(x)).unwrap()
+            m(y).total_cmp(&m(x))
         });
         a.session.meta_set("driver_latency", serde_json::json!({ "buckets_us": BUCKETS_US, "modules": s.modules.len(), "drivers": rows }));
     });

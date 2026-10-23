@@ -202,6 +202,10 @@ fn gpu_engines(app: &App, sink: &crate::session::Sink, t: i64, items: Vec<(Strin
             *game.entry(eng).or_default() += v;
         }
     }
+    // Busiest engine of the busiest adapter (and of the game), for cards NVML cannot read.
+    let busiest = per_adapter.values().copied().fold(0.0, f64::max).min(100.0);
+    let game_max = game.values().copied().fold(0.0, f64::max).min(100.0);
+    app.live.lock().unwrap().gpu_engines = Some(format!("GPU {busiest:.0}%{}", if game.is_empty() { String::new() } else { format!(" (game {game_max:.0}%)") }));
     for ((luid, eng), v) in per_adapter {
         if v > 0.05 {
             row!(sink, "{t},adapter_{luid},{},{v:.1}", crate::session::csv_escape(&eng));

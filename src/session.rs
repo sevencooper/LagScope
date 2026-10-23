@@ -13,6 +13,23 @@ use serde_json::{Map, Value};
 
 use crate::clock::{self, Clock};
 
+/// Folder of the newest recording, so a crash in any thread is written into it.
+static CURRENT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Logs panics (thread, message, place) to the UI log and to `errors.txt` in the current
+/// recording, which ends up in the zip. Without this a collector thread would die silently.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("internal error in thread '{}': {info}", std::thread::current().name().unwrap_or("?"));
+        if let Some(dir) = CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("errors.txt")).and_then(|mut f| writeln!(f, "{msg}"));
+        }
+        crate::ui::log(msg);
+        default(info);
+    }));
+}
+
 pub struct Sink {
     /// None once closed (late rows are dropped).
     w: Mutex<Option<BufWriter<File>>>,
@@ -66,6 +83,7 @@ impl Session {
         let name = format!("LagScope_{}", clock::format_compact(start_unix_ms, utc_offset_min));
         let dir = base.join(&name);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
         let events = Arc::new(open_sink(&dir, "events", "t_us,kind,detail")?);
         let s = Session {
             dir,

@@ -99,10 +99,6 @@ pub fn processes(buf: &mut Vec<u64>) -> Vec<ProcInfo> {
     out
 }
 
-pub fn snapshot() -> HashMap<u32, String> {
-    processes(&mut Vec::new()).into_iter().map(|p| (p.pid, p.name)).collect()
-}
-
 pub fn start(app: Arc<App>) -> Running {
     // Populate synchronously so the first network events already get names.
     let mut buf = Vec::new();
@@ -167,7 +163,7 @@ impl CpuTracker {
                 busy.push((pct, &p.name));
             }
         }
-        busy.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        busy.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (pct, name) in busy.iter().take(5) {
             row!(self.sink, "{t},{},{pct:.0}", crate::session::csv_escape(name));
         }
@@ -242,6 +238,9 @@ impl Environment {
         if first || changed || (!first && d.iter().any(|&x| x > 0)) {
             row!(self.sink, "{t},{},{:.0},{:.0},{},{},{},{}", up as u8, row.ReceiveLinkSpeed as f64 / 1e6, row.TransmitLinkSpeed as f64 / 1e6, if first { 0 } else { d[0] }, if first { 0 } else { d[1] }, if first { 0 } else { d[2] }, if first { 0 } else { d[3] });
         }
+        if !self.is_wifi {
+            app.live.lock().unwrap().wired = Some(if up { format!("cable, {:.0} Mbit/s", row.TransmitLinkSpeed as f64 / 1e6) } else { "cable unplugged / link down".to_string() });
+        }
         if changed {
             app.session.event("link", if up { format!("network link up, {:.0} Mbit/s", row.TransmitLinkSpeed as f64 / 1e6) } else { "network link DOWN".to_string() });
         }
@@ -259,6 +258,11 @@ const NOT_GAMES: &[&str] = &[
     "applicationframehost.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
     "textinputhost.exe", "nvidia overlay.exe", "nvcontainer.exe", "medal.exe", "overwolf.exe", "photos.exe",
     "vlc.exe", "mpc-hc64.exe", "wallpaper64.exe", "wallpaper32.exe", "rtss.exe", "msiafterburner.exe",
+    // Video and second-screen apps (a video on another monitor must not become "the game").
+    "mpv.exe", "mpc-be64.exe", "potplayermini64.exe", "potplayermini.exe", "wmplayer.exe", "video.ui.exe",
+    "microsoft.media.player.exe", "plex.exe", "kodi.exe", "wwahost.exe", "twitch.exe", "lively.exe",
+    "rainmeter.exe", "streamlabs obs.exe", "xboxpcapp.exe", "gamebar.exe", "nvidia app.exe", "parsecd.exe",
+    "whatsapp.exe", "telegram.exe",
 ];
 
 /// Auto-detect: the process that keeps presenting the most frames (>= 30/s for 5 s) is the game.

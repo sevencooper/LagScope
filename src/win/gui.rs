@@ -92,8 +92,6 @@ struct Shared {
     stop: bool,
     /// Which tab started the task (results are shown there).
     task_tab: Tab,
-    /// The running/last recording was started by auto-record (for the game: profile).
-    auto_game: Option<Profile>,
 }
 
 /// Scripted run for automated testing: actions at fixed times, screenshots, metrics.
@@ -115,16 +113,6 @@ struct SelfTest {
 
 struct GuiApp {
     shared: Arc<Mutex<Shared>>,
-    /// Auto-record on/off (read by the watcher thread), the tray icon and its events.
-    auto_on: Arc<std::sync::atomic::AtomicBool>,
-    cfg_shared: Arc<Mutex<Config>>,
-    tray: Arc<Mutex<Option<super::tray::Tray>>>,
-    tray_rx: mpsc::Receiver<super::tray::TrayEvent>,
-    tray_tx: mpsc::Sender<super::tray::TrayEvent>,
-    startup_task: bool,
-    hidden: bool,
-    exiting: bool,
-    told_about_tray: bool,
     log: Arc<Mutex<VecDeque<String>>>,
     cfg: Config,
     profiles: Vec<Profile>,
@@ -195,15 +183,14 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>, start_hidden: bool) -> Result<()> {
+pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
     let log = Arc::new(Mutex::new(VecDeque::new()));
-    let shared = Arc::new(Mutex::new(Shared { question: None, task: Task::Idle, stop: false, task_tab: Tab::Record, auto_game: None }));
+    let shared = Arc::new(Mutex::new(Shared { question: None, task: Task::Idle, stop: false, task_tab: Tab::Record }));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("LagScope {}", env!("CARGO_PKG_VERSION")))
             .with_inner_size([980.0, 720.0])
-            .with_min_inner_size([720.0, 520.0])
-            .with_visible(!start_hidden),
+            .with_min_inner_size([720.0, 520.0]),
         centered: true,
         ..Default::default()
     };
@@ -246,30 +233,13 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>, start_hidden: bool)
                     Err(e) => format!("Could not restore '{what}': {e:#}"),
                 });
             }
-            let auto_on = Arc::new(std::sync::atomic::AtomicBool::new(start_hidden || profile::setting("auto_record").and_then(|v| v.as_bool()).unwrap_or(false)));
-            let cfg_shared = Arc::new(Mutex::new(cfg.clone()));
-            let tray = Arc::new(Mutex::new(None));
-            let (tray_tx, tray_rx) = mpsc::channel();
-            {
-                let (s, c, on, cf, t) = (sh.clone(), ctx.clone(), auto_on.clone(), cfg_shared.clone(), tray.clone());
-                let profs = profiles.clone();
-                std::thread::Builder::new().name("auto-record".into()).spawn(move || auto_record_loop(s, c, on, cf, profs, t)).ok();
-            }
+            remove_old_autostart();
             let selftest = selftest.map(|(scenario, out)| {
                 let _ = std::fs::create_dir_all(&out);
                 SelfTest { scenario, out, t0: Instant::now(), step: 0, shots: Vec::new(), cpu0: 0.0, idle_cpu: None, wait_until: 0.0, q_seen: None, cpu30: None, frames30: 0, threads30: Vec::new() }
             });
-            let mut app = GuiApp {
+            let app = GuiApp {
                 shared: sh,
-                auto_on,
-                cfg_shared,
-                tray,
-                tray_rx,
-                tray_tx,
-                startup_task: startup_task_exists(),
-                hidden: start_hidden,
-                exiting: false,
-                told_about_tray: start_hidden,
                 log,
                 cfg,
                 profiles,
@@ -294,23 +264,16 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>, start_hidden: bool)
                 compare_pick: Vec::new(),
                 comparison: None,
             };
-            if app.auto_on.load(std::sync::atomic::Ordering::Relaxed) {
-                app.ensure_tray(&ctx);
-            }
             Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
 }
 
-/// Starts a recording on a worker thread (Start button or auto-record).
-fn start_recording(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, mut cfg: Config, auto: Option<Profile>) {
+/// Starts a recording on a worker thread.
+fn start_recording(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, mut cfg: Config) {
     cfg.wifi_check = None;
     cfg.open_report = false;
-    if let Some(p) = &auto {
-        cfg.profile = p.clone();
-        cfg.processes = p.processes.clone();
-    }
     let sh = shared.clone();
     let c = ctx.clone();
     {
@@ -318,7 +281,6 @@ fn start_recording(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, mut cfg: Co
         s.stop = false;
         s.task = Task::Preparing("Starting the recording ...");
         s.task_tab = Tab::Record;
-        s.auto_game = auto;
     }
     std::thread::spawn(move || match capture::start(cfg, None, false) {
         Ok(cap) => drive(&sh, &c, cap),
@@ -329,88 +291,21 @@ fn start_recording(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, mut cfg: Co
     });
 }
 
-/// Auto-record: every 2 s, start recording when a game with a profile is running, and stop
-/// ~20 s after it exits. Runs on its own thread; costs one process snapshot per tick.
-fn auto_record_loop(shared: Arc<Mutex<Shared>>, ctx: egui::Context, enabled: Arc<std::sync::atomic::AtomicBool>, cfg: Arc<Mutex<Config>>, profiles: Vec<Profile>, tray: Arc<Mutex<Option<super::tray::Tray>>>) {
-    use std::sync::atomic::Ordering;
-    let mut gone_since: Option<Instant> = None;
-    let mut announced_done = true;
-    loop {
-        std::thread::sleep(Duration::from_secs(2));
-        let on = enabled.load(Ordering::Relaxed);
-        let (busy, auto, done_headline) = {
-            let s = shared.lock().unwrap();
-            let done = match &s.task {
-                Task::Done(f) => Some(if f.discarded { "Stopped quickly - nothing saved.".to_string() } else { f.headline.clone() }),
-                _ => None,
-            };
-            (s.task.busy(), s.auto_game.clone(), done)
-        };
-        // Tell the user when an automatic recording has its report.
-        if let (Some(p), Some(h)) = (&auto, &done_headline) {
-            if !announced_done {
-                announced_done = true;
-                if let Some(t) = tray.lock().unwrap().as_ref() {
-                    t.notify(&format!("{} - report ready", p.name), h);
-                }
-            }
-        }
-        let names: Vec<String> = if on || auto.is_some() { super::procwatch::snapshot().into_values().map(|n| n.to_ascii_lowercase()).collect() } else { Vec::new() };
-        let running = |p: &Profile| p.processes.iter().any(|x| names.contains(&x.to_ascii_lowercase()));
-        let tip = match (&auto, busy, on) {
-            (Some(p), true, _) => format!("LagScope - recording {}", p.name),
-            (_, true, _) => "LagScope - recording".to_string(),
-            (_, false, true) => "LagScope - auto-record on (waiting for a game)".to_string(),
-            _ => "LagScope".to_string(),
-        };
-        if let Some(t) = tray.lock().unwrap().as_ref() {
-            t.set_state(&tip, on);
-        }
-        if busy {
-            // Stop an automatic recording once its game has been gone for 20 s.
-            if let Some(p) = &auto {
-                if running(p) {
-                    gone_since = None;
-                } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(20) {
-                    shared.lock().unwrap().stop = true;
-                    gone_since = None;
-                    ctx.request_repaint();
-                }
-            }
-            continue;
-        }
-        if !on {
-            continue;
-        }
-        if let Some(p) = profiles.iter().find(|p| !p.is_auto() && running(p)) {
-            crate::ui::log(format!("Auto-record: {} started, recording.", p.name));
-            if let Some(t) = tray.lock().unwrap().as_ref() {
-                t.notify("LagScope is recording", &format!("{} is running. Press {} at every lag spike.", p.name, cfg.lock().unwrap().hotkey));
-            }
-            announced_done = false;
-            start_recording(&shared, &ctx, cfg.lock().unwrap().clone(), Some(p.clone()));
-            ctx.request_repaint();
-        }
+/// Auto-record and "start with Windows" were removed in 0.4.5: delete the logon task an
+/// older version may have created (it would start an old exe in the tray), on a helper
+/// thread so the window opens without waiting for schtasks.
+fn remove_old_autostart() {
+    if profile::setting("auto_record").is_some() {
+        profile::set_setting("auto_record", serde_json::Value::Null);
     }
-}
-
-/// "Start with Windows": a scheduled task at logon with highest privileges (the only way to
-/// start an administrator tool at logon without a UAC prompt).
-const TASK: &str = "LagScope auto-record";
-
-pub fn startup_task_exists() -> bool {
-    super::sysinfo::run_env("schtasks.exe", &["/Query", "/TN", TASK], None, Duration::from_secs(10), &[]).contains(TASK)
-}
-
-pub fn set_startup_task(on: bool) -> Result<(), String> {
-    let out = if on {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let tr = format!("\"{}\" --tray", exe.display());
-        super::sysinfo::run_env("schtasks.exe", &["/Create", "/TN", TASK, "/TR", &tr, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"], None, Duration::from_secs(15), &[])
-    } else {
-        super::sysinfo::run_env("schtasks.exe", &["/Delete", "/TN", TASK, "/F"], None, Duration::from_secs(15), &[])
-    };
-    if startup_task_exists() == on { Ok(()) } else { Err(out.trim().to_string()) }
+    std::thread::spawn(|| {
+        const TASK: &str = "LagScope auto-record";
+        let q = super::sysinfo::run_env("schtasks.exe", &["/Query", "/TN", TASK], None, Duration::from_secs(10), &[]);
+        if q.contains(TASK) {
+            super::sysinfo::run_env("schtasks.exe", &["/Delete", "/TN", TASK, "/F"], None, Duration::from_secs(15), &[]);
+            crate::ui::log("Removed the 'start with Windows' task of an older LagScope version.");
+        }
+    });
 }
 
 /// Polls the running capture until it stops, then builds the report.
@@ -439,7 +334,7 @@ fn drive(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, cap: capture::Capture
 impl GuiApp {
     fn start_record(&mut self, ctx: &egui::Context) {
         self.reset_history();
-        start_recording(&self.shared, ctx, self.cfg.clone(), None);
+        start_recording(&self.shared, ctx, self.cfg.clone());
     }
 
     fn start_check(&mut self, ctx: &egui::Context, unattended: bool, force: bool, secs: u64) {
@@ -471,79 +366,16 @@ impl GuiApp {
         });
     }
 
-    /// Creates the tray icon (once).
-    fn ensure_tray(&mut self, ctx: &egui::Context) {
-        let mut t = self.tray.lock().unwrap();
-        if t.is_some() {
-            return;
-        }
-        let (tx, c) = (self.tray_tx.clone(), ctx.clone());
-        *t = super::tray::Tray::start("LagScope", self.auto_on.load(std::sync::atomic::Ordering::Relaxed), move |ev| {
-            let _ = tx.send(ev);
-            c.request_repaint();
-        });
-    }
-
-    fn set_auto(&mut self, ctx: &egui::Context, on: bool) {
-        self.auto_on.store(on, std::sync::atomic::Ordering::Relaxed);
-        profile::set_setting("auto_record", on.into());
-        if on {
-            self.ensure_tray(ctx);
-        }
-        crate::ui::log(format!("Auto-record {}", if on { "on" } else { "off" }));
-    }
-
-    fn show_window(&mut self, ctx: &egui::Context) {
-        self.hidden = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-
-    /// Tray events, window closing and the "close after finishing" step. Runs every frame and
-    /// also while the window is hidden (eframe calls `logic` then).
+    /// Window closing and the "close after finishing" step. Runs every frame.
     fn housekeeping(&mut self, ctx: &egui::Context) {
-        use super::tray::TrayEvent;
-        while let Ok(ev) = self.tray_rx.try_recv() {
-            match ev {
-                TrayEvent::Open => self.show_window(ctx),
-                TrayEvent::ToggleAuto => {
-                    let on = !self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
-                    self.set_auto(ctx, on);
-                }
-                TrayEvent::Exit => {
-                    self.exiting = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
         let busy = self.shared.lock().unwrap().task.busy();
-        if ctx.input(|i| i.viewport().close_requested()) {
-            let tray = self.tray.lock().unwrap().is_some() && self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
-            if tray && !self.exiting {
-                // With auto-record on, closing the window keeps LagScope running in the tray.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.hidden = true;
-                if !self.told_about_tray {
-                    self.told_about_tray = true;
-                    if let Some(t) = self.tray.lock().unwrap().as_ref() {
-                        t.notify("LagScope keeps running", "Auto-record is on, so LagScope stays here in the tray. Right-click the icon to exit.");
-                    }
-                }
-            } else if busy {
-                // Closing while something runs: stop it, build the report, then close.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.shared.lock().unwrap().stop = true;
-                self.close_when_done = true;
-            } else if let Some(t) = self.tray.lock().unwrap().as_ref() {
-                t.remove();
-            }
+        if ctx.input(|i| i.viewport().close_requested()) && busy {
+            // Closing while something runs: stop it, build the report, then close.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.shared.lock().unwrap().stop = true;
+            self.close_when_done = true;
         }
         if self.close_when_done && !busy {
-            if let Some(t) = self.tray.lock().unwrap().as_ref() {
-                t.remove();
-            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if busy && self.close_when_done {
@@ -707,18 +539,6 @@ impl GuiApp {
         }
         ui.add_space(14.0);
         ui.separator();
-        let mut on = self.auto_on.load(std::sync::atomic::Ordering::Relaxed);
-        let games: Vec<&str> = self.profiles.iter().filter(|p| !p.is_auto()).map(|p| p.name.as_str()).collect();
-        if ui
-            .checkbox(&mut on, format!("Record automatically when I play {}", games.join(" or ")))
-            .on_hover_text("LagScope waits in the tray (next to the clock) and makes a report after each game. Reports show up under Reports.")
-            .changed()
-        {
-            self.set_auto(&ctx, on);
-        }
-        let mut st = self.startup_task;
-        let startup_changed = ui.add_enabled(on || st, egui::Checkbox::new(&mut st, "Start with Windows")).on_hover_text("Starts hidden in the tray when you log in").changed();
-        ui.add_space(6.0);
         egui::CollapsingHeader::new(RichText::new("Advanced").weak()).id_salt("advanced").show(ui, |ui| {
             if ui
                 .add_enabled(!busy, egui::Checkbox::new(&mut self.cfg.kernel_trace, "Driver & disk tracing"))
@@ -728,18 +548,6 @@ impl GuiApp {
                 profile::set_setting("kernel_trace", self.cfg.kernel_trace.into());
             }
         });
-        if startup_changed {
-            match set_startup_task(st) {
-                Ok(()) => {
-                    self.startup_task = st;
-                    crate::ui::log(format!("Start with Windows: {}", if st { "on" } else { "off" }));
-                }
-                Err(e) => {
-                    crate::ui::log(format!("Could not change 'start with Windows': {e}"));
-                    self.show_log = true;
-                }
-            }
-        }
     }
 
     /// Status of the last task (preparing / finishing / done / failed) on its own tab.
@@ -875,11 +683,16 @@ impl GuiApp {
                 .collect();
             ui.label(if ping.is_empty() { "-".into() } else { ping.join("   ") });
             ui.end_row();
-            ui.label(RichText::new("Wi-Fi").strong());
-            ui.label(l.wifi.clone().or(l.wifi_etw_quality.map(|q| format!("link quality {q}"))).unwrap_or_else(|| "-".into()));
+            if let Some(w) = &l.wired {
+                ui.label(RichText::new("Network").strong());
+                ui.label(w);
+            } else {
+                ui.label(RichText::new("Wi-Fi").strong());
+                ui.label(l.wifi.clone().or(l.wifi_etw_quality.map(|q| format!("link quality {q}"))).unwrap_or_else(|| "-".into()));
+            }
             ui.end_row();
             ui.label(RichText::new("System").strong());
-            let mut sys = format!("{}\n{}", l.cpu.clone().unwrap_or_else(|| "-".into()), l.gpu.clone().unwrap_or_else(|| "-".into()));
+            let mut sys = format!("{}\n{}", l.cpu.clone().unwrap_or_else(|| "-".into()), l.gpu.clone().or(l.gpu_engines.clone()).unwrap_or_else(|| "-".into()));
             if let Some(t) = &l.top_cpu {
                 sys.push_str(&format!("\nbusy: {t}"));
             }
@@ -1437,7 +1250,7 @@ impl GuiApp {
                     .map(|(id, name, c)| (c - st.threads30.iter().find(|x| x.0 == id).map(|x| x.2).unwrap_or(0.0), name))
                     .filter(|x| x.0 > 0.05)
                     .collect();
-                per.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                per.sort_by(|a, b| b.0.total_cmp(&a.0));
                 crate::ui::log(format!("selftest: threads {}", per.iter().map(|(c, n)| format!("{n}={c:.2}s")).collect::<Vec<_>>().join(" ")));
                 if let Some(c30) = st.cpu30 {
                     crate::ui::log(format!("selftest: steady-state cpu_pct_one_core={:.2} (t=30..{t:.0}), frames={}", (cpu_secs() - c30) / (t - 30.0) * 100.0, FRAMES.load(std::sync::atomic::Ordering::Relaxed) - st.frames30));
@@ -1525,36 +1338,6 @@ impl GuiApp {
                 shot(ctx, st, "03_network_done");
                 st.step = 100;
             }
-            ("auto", 1) => {
-                self.set_auto(ctx, true);
-                st.step += 1;
-            }
-            ("auto", 2) if self.shared.lock().unwrap().auto_game.is_some() && matches!(self.shared.lock().unwrap().task, Task::Running { .. }) => {
-                st.wait_until = t + 12.0;
-                st.step += 1;
-            }
-            ("auto", 3) if t > st.wait_until => {
-                shot(ctx, st, "02_auto_recording");
-                st.step += 1;
-            }
-            ("auto", 4) if done => {
-                st.wait_until = t + 3.0;
-                st.step += 1;
-            }
-            ("auto", 5) if t > st.wait_until => {
-                shot(ctx, st, "03_auto_done");
-                // Like clicking X with auto-record on: should hide to the tray, not exit.
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                st.wait_until = t + 4.0;
-                st.step += 1;
-            }
-            ("auto", 6) if t > st.wait_until => {
-                crate::ui::log(format!("selftest: hidden after close = {}", self.hidden));
-                // Restore the user's setting, then exit through the tray menu path.
-                self.auto_on.store(false, std::sync::atomic::Ordering::Relaxed);
-                profile::set_setting("auto_record", false.into());
-                st.step = 101;
-            }
             ("prompt", 1) => {
                 std::thread::spawn(|| console::ask_yes_no("Check Windows Update for newer Wi-Fi / Bluetooth drivers? (takes a minute or two)", true));
                 st.wait_until = t + 6.0;
@@ -1617,11 +1400,7 @@ impl GuiApp {
             }
             (_, 102) => {
                 std::thread::sleep(Duration::from_millis(500));
-                if self.tray.lock().unwrap().is_some() {
-                    let _ = self.tray_tx.send(super::tray::TrayEvent::Exit);
-                } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 st.step = 103;
             }
             _ => {}
@@ -1657,7 +1436,6 @@ impl eframe::App for GuiApp {
         self.save_screenshots(&ctx);
 
         let busy = self.shared.lock().unwrap().task.busy();
-        *self.cfg_shared.lock().unwrap() = self.cfg.clone();
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(4.0);

@@ -124,8 +124,9 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         ));
     }
     let gw = r.probes.iter().find(|p| p.target == "gateway");
+    let gw_unstable = gw.is_some_and(|g| g.sent > 100 && (g.p99_ms > 20.0 || g.lost as f64 / g.sent as f64 > 0.005));
     if let Some(g) = gw {
-        if g.sent > 100 && (g.p99_ms > 20.0 || g.lost as f64 / g.sent as f64 > 0.005) {
+        if gw_unstable {
             f.push(format!(
                 "The very first hop (your router) is unstable: p99 {:.0} ms / {:.2}% loss. A healthy {} link stays under ~5-10 ms with no loss.",
                 g.p99_ms,
@@ -161,7 +162,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     // Correlations.
     if !r.gap_correlation.is_empty() {
         let mut parts: Vec<(String, f64)> = r.gap_correlation.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        parts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        parts.sort_by(|a, b| b.1.total_cmp(&a.1));
         let txt: Vec<String> = parts.iter().filter(|(_, v)| *v > 0.0).map(|(k, v)| format!("{k} {}", pct(*v))).collect();
         f.push(format!(
             "Of {} game stalls ≥100 ms, coincided with: {}.",
@@ -186,10 +187,10 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     // A first-hop stall on an exact timer that also freezes the game stream.
     let mut clockwork = None;
     if let (Some(gwp), Some(gp)) = (per("gateway"), per("game inbound")) {
-        let gwc = r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0);
+        let gwc = r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0);
         if gwp.score >= 0.8 && gwp.events >= 10 && same_period(gwp.period_s, gp.period_s) && gwc >= 0.6 {
             let median = |mut v: Vec<f64>| {
-                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v.sort_by(|a, b| a.total_cmp(b));
                 v.get(v.len() / 2).copied().unwrap_or(0.0)
             };
             let gw_ms = median(r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).map(|a| a.value).collect());
@@ -250,7 +251,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     let dpc = count(Kind::DpcSpike);
     if dpc > 0 {
-        f.push(format!("{dpc} samples with high DPC/interrupt load (≥5% of CPU time)."));
+        f.push(format!("{dpc} moments with very high driver load (DPC/interrupt time a full CPU core above normal)."));
     }
     // Router identification and its advice (advice only when the network is implicated).
     if let Some(name) = d.meta["router"]["name"].as_str().filter(|n| !n.is_empty()) {
@@ -262,13 +263,28 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     checks.drivers = drivers;
     checks.disk = disk;
     if count(Kind::GpuLimit) > 0 {
-        f.push("The GPU hit thermal / hardware slowdown limits during the session.".into());
+        f.push(format!("The GPU hit heat / hardware slowdown limits {}× during the session.", count(Kind::GpuLimit)));
+        if super::health::gpu_limited(d, r) {
+            rec.push(if super::hardware::is_laptop(d) {
+                "The graphics card kept slowing down from heat: raise the laptop's back for airflow, clean its vents, use its performance / fan mode, or cap the frame rate a little below the screen's refresh rate."
+            } else {
+                "The graphics card kept slowing down from heat: check that its fans spin up, clean dust from the card and case filters, improve case airflow, or cap the frame rate a little below the monitor's refresh rate."
+            }
+            .into());
+        }
     }
 
     // Data-quality notes.
+    if !r.away.is_empty() {
+        let secs: f64 = r.away.iter().map(|(a, b)| (b - a) as f64 / 1e6).sum();
+        f.push(format!(
+            "You switched away from the game {} time(s) (alt-tab or another window, about {secs:.0} s in total): frames around those moments are not judged.",
+            r.away.len()
+        ));
+    }
     let ignored = r.anomalies.iter().filter(|a| !a.in_match && matches!(a.kind, Kind::InGap | Kind::FrameHitch)).count();
     if ignored > 0 {
-        f.push(format!("{ignored} stream gaps / frame hitches outside match play (menus, loading, spectating) are shown but not counted."));
+        f.push(format!("{ignored} stream gaps / frame hitches outside match play (menus, loading, spectating) or while you were switched away are shown but not counted."));
     }
     if r.wifi_counters_bogus {
         f.push("The Wi-Fi driver's retry counters are not plausible (more retries than frames sent), so Wi-Fi retries were ignored.".into());
@@ -282,6 +298,9 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     if d.meta["wifi_location_blocked"].as_bool() == Some(true) {
         rec.push("Windows Location services were off, so RSSI / PHY rate / roaming details were not available (link quality and scan events were still recorded). For richer Wi-Fi data, turn on Settings > Privacy & security > Location > Location services and 'Let desktop apps access your location' for the test session.".into());
+    }
+    if let Ok(e) = std::fs::read_to_string(d.dir.join("errors.txt")) {
+        f.push(format!("LagScope hit an internal error while recording, so some data may be missing: {}", e.lines().next().unwrap_or("")));
     }
     if d.etw_lost > 0 {
         f.push(format!("Note: {} trace events were lost (very heavy system load); counts may be slightly low.", d.etw_lost));
@@ -321,7 +340,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
         format!("{n} of {} marked spikes point to: {}", r.verdicts.len(), category_text(cat))
     } else if s.gaps_100ms >= 3 && s.gaps_100ms as f64 / ((if s.match_s > 0.0 { s.match_s } else { s.active_s }) / 60.0).max(1.0) >= 0.3 {
-        let gwc = r.gap_correlation.get("gateway (Wi-Fi hop) spike/loss").copied().unwrap_or(0.0);
+        let gwc = r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0);
         let fc = r.gap_correlation.get("frame hitch").copied().unwrap_or(0.0);
         if gwc >= 0.4 {
             format!("Game stalls mostly coincide with spikes on your first network hop ({}): {}", pct(gwc), category_text(if is_wifi { "wifi" } else { "lan" }))
@@ -339,16 +358,24 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     if !r.verdicts.is_empty() || s.gaps_100ms > 0 {
         rec.push("Compare with a control session: record a game that feels fine (pick it on the Record tab, or use Auto-detect) and compare the two reports.".into());
     }
+    if !is_wifi && (gw_unstable || headline.contains("link to the router")) {
+        rec.insert(0, "The link between the PC and the router is what stalls. If the PC connects through a powerline adapter, a mesh node or a switch, test with a cable straight to the router; otherwise try another cable and router port, update the network adapter's driver, and restart the router.".into());
+    }
     let network_issue = headline.contains("Wi-Fi") || headline.contains("router") || headline.contains("network hop") || r.wifi_check.as_ref().is_some_and(|o| o.problem);
     if network_issue {
         for n in d.meta["router"]["notes"].as_array().into_iter().flatten().filter_map(|n| n.as_str()) {
             rec.insert(rec.len().min(2), n.to_string());
         }
     }
-    r.headline = headline;
     r.findings = f;
     r.recommendations = rec;
     r.health = super::health::scorecard(d, r, &checks);
+    let look: Vec<&str> = r.health.iter().filter(|h| h.status == "warn").map(|h| h.area.as_str()).collect();
+    r.headline = if headline.starts_with("No significant problems") && !look.is_empty() {
+        format!("No lag problems found, but worth a look: {}", look.join(", "))
+    } else {
+        headline
+    };
     r.background_cpu = checks.background;
     r.hitch_procs = checks.hitch_procs;
 }
@@ -398,7 +425,7 @@ fn driver_findings(d: &Data, r: &Analysis, f: &mut Vec<String>, rec: &mut Vec<St
     // DPCs under gaming load are normal).
     let name = |v: &serde_json::Value| v["driver"].as_str().unwrap_or("?").to_string();
     let effective = |v: &serde_json::Value| (worst(v) - (super::detect::driver_threshold_us(&name(v)) - super::detect::DRIVER_US)).max(0.0);
-    let top = list.iter().max_by(|a, b| effective(a).partial_cmp(&effective(b)).unwrap())?;
+    let top = list.iter().max_by(|a, b| effective(a).total_cmp(&effective(b)))?;
     let top_us = effective(top);
     let names: Vec<String> = list
         .iter()

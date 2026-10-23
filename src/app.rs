@@ -91,6 +91,10 @@ pub struct LiveData {
     /// Busiest other program in the last second (if it used a lot of CPU).
     pub top_cpu: Option<String>,
     pub top_talker: Option<String>,
+    /// Set when the connection is wired: link state and speed (replaces the Wi-Fi row).
+    pub wired: Option<String>,
+    /// GPU load from Windows' own counters, for cards without NVIDIA's interface.
+    pub gpu_engines: Option<String>,
     pub marks: u32,
     pub collectors: BTreeMap<String, String>,
 }

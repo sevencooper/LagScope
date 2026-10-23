@@ -44,8 +44,9 @@ impl Row<'_> {
     pub fn i(&self, k: &str) -> Option<i64> {
         self.s(k).trim().parse().ok()
     }
+    /// A finite number ("NaN" / "inf" from a counter would break sorting and sums).
     pub fn f(&self, k: &str) -> Option<f64> {
-        self.s(k).trim().parse().ok()
+        self.s(k).trim().parse().ok().filter(|v: &f64| v.is_finite())
     }
 }
 
@@ -191,6 +192,11 @@ pub struct Data {
     pub stall_1s: Vec<(i64, i64)>,
     pub cpu: Vec<CpuRow>,
     pub gpu: Vec<GpuRow>,
+    /// Foreground changes: (t, the game is the foreground window).
+    pub focus: Vec<(i64, bool)>,
+    /// From Windows' GPU engine counters (any vendor), once a second: (t, busiest engine %
+    /// of any adapter, busiest engine % used by the game).
+    pub gpu_engines: Vec<(i64, f64, f64)>,
     pub proc_net: Vec<ProcNet>,
     pub marks: Vec<i64>,
     pub events: Vec<Note>,
@@ -396,6 +402,22 @@ pub fn load(dir: &Path) -> Result<Data> {
     })?;
     seen("cpu", present, &mut files);
 
+    each(dir, "focus", |r| {
+        if let Some(t) = r.i("t_us") {
+            d.focus.push((t, r.s("game") == "1"));
+        }
+    })?;
+    let mut eng: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+    each(dir, "gpu_engines", |r| {
+        let (Some(t), Some(v)) = (r.i("t_us"), r.f("util_pct")) else { return };
+        let e = eng.entry(t).or_default();
+        if r.s("scope") == "game" {
+            e.1 = e.1.max(v.min(100.0));
+        } else {
+            e.0 = e.0.max(v.min(100.0));
+        }
+    })?;
+    d.gpu_engines = eng.into_iter().map(|(t, (a, g))| (t, a, g)).collect();
     let present = each(dir, "gpu", |r| {
         let Some(t) = r.i("t_us") else { return };
         if r.i("gpu").unwrap_or(0) != 0 {

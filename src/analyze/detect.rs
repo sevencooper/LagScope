@@ -181,6 +181,9 @@ pub struct Analysis {
     pub stream: StreamStats,
     /// Match-play intervals (us), from the client's send rate.
     pub phases: Vec<(i64, i64)>,
+    /// Intervals around times the player switched away from the game (alt-tab etc.), when
+    /// its frames are not judged.
+    pub away: Vec<(i64, i64)>,
     /// The game's own region pings, nearest first.
     pub beacons: Vec<Beacon>,
     /// Wi-Fi driver retry counters were implausible and ignored.
@@ -227,7 +230,7 @@ pub fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn sorted(mut v: Vec<f64>) -> Vec<f64> {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     v
 }
 
@@ -247,6 +250,9 @@ pub fn server_endpoints(d: &Data) -> Vec<u32> {
 }
 
 const PAUSE_US: i64 = 5_000_000;
+
+/// Correlation key for spikes / loss on the first hop (the router).
+pub const GW_KEY: &str = "router hop spike/loss";
 
 /// Gaps in a packet stream. Returns (median interval us, anomalies).
 fn stream_gaps(times: &[i64], kind: Kind, label: &str, min_gap: i64) -> (f64, Vec<Anomaly>, Vec<f64>) {
@@ -504,6 +510,12 @@ fn disk_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
 }
 
 fn system_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
+    // DPC/interrupt time is a share of all CPUs, so judge it in cores, against this PC's
+    // own normal: gaming keeps a few tenths of a core busy in drivers all the time (GPU,
+    // network, USB, audio). A full extra core on top of that is a driver storm.
+    let ncpu = d.meta["logical_cpus"].as_f64().filter(|&n| n > 0.0).unwrap_or(8.0);
+    let cores = |c: &super::load::CpuRow| (c.dpc.unwrap_or(0.0) + c.intr.unwrap_or(0.0)) * ncpu / 100.0;
+    let dpc_limit = percentile(&sorted(d.cpu.iter().map(cores).collect()), 0.5) + 1.0;
     for &(t, late) in &d.stalls {
         if late >= 8_000 {
             out.push(Anomaly::new(t, late, Kind::Stall, "system", late as f64 / 1000.0, format!("timer wake-up {:.1} ms late (whole-system stall)", late as f64 / 1000.0)));
@@ -511,8 +523,8 @@ fn system_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
     }
     for c in &d.cpu {
         let dpc = c.dpc.unwrap_or(0.0) + c.intr.unwrap_or(0.0);
-        if dpc >= 5.0 {
-            out.push(Anomaly::new(c.t - 250_000, 250_000, Kind::DpcSpike, "cpu", dpc, format!("DPC+interrupt time {dpc:.1}% of all CPUs")));
+        if cores(c) >= dpc_limit {
+            out.push(Anomaly::new(c.t - 250_000, 250_000, Kind::DpcSpike, "cpu", dpc, format!("DPC+interrupt time {:.1} CPU cores (normal {:.1})", cores(c), dpc_limit - 1.0)));
         }
         // Page-ins also count memory-mapped file reads (asset streaming), so they only mean
         // memory pressure when free RAM is actually low.
@@ -558,13 +570,14 @@ fn system_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
     }
 }
 
-fn frame_analysis(d: &Data, phases: &[(i64, i64)], out: &mut Vec<Anomaly>) -> FrameStats {
+fn frame_analysis(d: &Data, phases: &[(i64, i64)], away: &[(i64, i64)], out: &mut Vec<Anomaly>) -> FrameStats {
+    let counted = |t: i64| in_phases(phases, t) && !in_any(away, t);
     let times: Vec<i64> = d.frames.iter().map(|f| f.0).collect();
     let iv: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
     let normal = sorted(
         iv.iter()
             .zip(&times)
-            .filter(|&(&g, &t)| g < 2_000_000 && in_phases(phases, t))
+            .filter(|&(&g, &t)| g < 2_000_000 && counted(t))
             .map(|(&g, _)| g as f64 / 1000.0)
             .collect(),
     );
@@ -587,7 +600,7 @@ fn frame_analysis(d: &Data, phases: &[(i64, i64)], out: &mut Vec<Anomaly>) -> Fr
     for (i, &g) in iv.iter().enumerate() {
         let ms = g as f64 / 1000.0;
         if ms > thr && g < 2_000_000 {
-            if in_phases(phases, times[i]) {
+            if counted(times[i]) {
                 st.hitches_50ms += (ms >= 50.0) as usize;
                 st.hitches_100ms += (ms >= 100.0) as usize;
             }
@@ -608,6 +621,35 @@ fn frame_analysis(d: &Data, phases: &[(i64, i64)], out: &mut Vec<Anomaly>) -> Fr
 /// True if `t` is inside match play (or if no phases could be determined).
 fn in_phases(phases: &[(i64, i64)], t: i64) -> bool {
     phases.is_empty() || phases.iter().any(|&(a, b)| t >= a && t <= b)
+}
+
+fn in_any(iv: &[(i64, i64)], t: i64) -> bool {
+    iv.iter().any(|&(a, b)| t >= a && t <= b)
+}
+
+/// While the game is not the foreground window (alt-tab, a click on another screen), plus
+/// a moment before the switch and 2 s after coming back: switching itself makes the game
+/// hitch, and in the background it may run at a different frame rate. Only once the game
+/// has had focus (before that, nothing of it is recorded anyway).
+pub fn away_intervals(focus: &[(i64, bool)], end: i64) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    let mut seen = false;
+    let mut left: Option<i64> = None;
+    for &(t, game) in focus {
+        match (game, left) {
+            (true, Some(l)) => {
+                out.push((l - 500_000, t + 2_000_000));
+                left = None;
+            }
+            (false, None) if seen => left = Some(t),
+            _ => {}
+        }
+        seen |= game;
+    }
+    if let Some(l) = left {
+        out.push((l - 500_000, end));
+    }
+    out
 }
 
 /// Match play = seconds where the client sends at a high rate (input/state updates). In
@@ -689,7 +731,7 @@ pub fn beacons(d: &Data, servers: &[u32]) -> Vec<Beacon> {
             b
         })
         .collect();
-    v.sort_by(|a, b| a.p50_ms.partial_cmp(&b.p50_ms).unwrap());
+    v.sort_by(|a, b| a.p50_ms.total_cmp(&b.p50_ms));
     v
 }
 
@@ -756,7 +798,7 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
         })
         .collect();
     if est.len() >= 3 {
-        est.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        est.sort_by(|a, b| a.total_cmp(b));
         p = est[est.len() / 2];
     }
     Some(((p * 100.0).round() / 100.0, top, times.len()))
@@ -800,7 +842,7 @@ fn driver_cmd_correlation(d: &Data, an: &[Anomaly]) -> Vec<DriverCmdCorr> {
             (hit >= 0.6 && hit - chance >= 0.4).then(|| DriverCmdCorr { what: what.to_string(), process, hit, chance, count: ts.len() })
         })
         .collect();
-    out.sort_by(|a, b| (b.hit - b.chance).partial_cmp(&(a.hit - a.chance)).unwrap());
+    out.sort_by(|a, b| (b.hit - b.chance).total_cmp(&(a.hit - a.chance)));
     out.truncate(5);
     out
 }
@@ -822,12 +864,12 @@ fn corr(an: &[Anomaly], base: &[&Anomaly], kinds: &[Kind], target: Option<&str>,
 
 const PROBE: &[Kind] = &[Kind::ProbeSpike, Kind::ProbeLoss, Kind::RttPlateau];
 
-fn verdict_for(an: &[Anomaly], t: i64, n: usize) -> Verdict {
+fn verdict_for(an: &[Anomaly], t: i64, n: usize, wifi: bool) -> Verdict {
     // People press the key a second or two after noticing: judge the preceding ~4 s first,
     // and only fall back to a wider window (with low confidence) if that is clean.
-    let mut v = verdict_window(an, t, n, t - 4_000_000, t + 1_000_000);
+    let mut v = verdict_window(an, t, n, t - 4_000_000, t + 1_000_000, wifi);
     if v.category == "unknown" {
-        let wide = verdict_window(an, t, n, t - 10_000_000, t + 2_000_000);
+        let wide = verdict_window(an, t, n, t - 10_000_000, t + 2_000_000, wifi);
         if wide.category != "unknown" {
             v = Verdict { culprit: format!("Possibly (5-10 s before the key press): {}", wide.culprit), confidence: "low", ..wide };
         }
@@ -835,9 +877,9 @@ fn verdict_for(an: &[Anomaly], t: i64, n: usize) -> Verdict {
     v
 }
 
-fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
+fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64, is_wifi: bool) -> Verdict {
     let biggest = |kinds: &[Kind], target: Option<&str>| -> Option<Anomaly> {
-        near(an, kinds, target, a, b).into_iter().max_by(|x, y| x.value.partial_cmp(&y.value).unwrap())
+        near(an, kinds, target, a, b).into_iter().max_by(|x, y| x.value.total_cmp(&y.value))
     };
     let in_gap = biggest(&[Kind::InGap], None);
     let out_gap = biggest(&[Kind::OutGap], None);
@@ -887,9 +929,13 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64) -> Verdict {
             ("Local PC: the game stopped sending and receiving at the same time as a frame hitch".into(), "local", "medium")
         } else if gw.is_some() && (in_gap.is_none() || overlaps(&gw, &in_gap, 500_000)) {
             let extra = if !wifi.is_empty() { format!(" ({} nearby)", wifi[0].kind.label()) } else { String::new() };
-            (format!("Wi-Fi / local network: the router hop itself spiked{extra}"), "wifi", if gap_ms >= 100.0 { "high" } else { "medium" })
+            if is_wifi {
+                (format!("Wi-Fi: the router hop itself spiked{extra}"), "wifi", if gap_ms >= 100.0 { "high" } else { "medium" })
+            } else {
+                ("Local network: the link to the router spiked".into(), "lan", if gap_ms >= 100.0 { "high" } else { "medium" })
+            }
         } else if hop2.is_some() && (in_gap.is_none() || overlaps(&hop2, &in_gap, 500_000)) {
-            ("ISP access line (modem / first ISP hop) spiked; the Wi-Fi hop was clean".into(), "isp", "medium")
+            ("ISP access line (modem / first ISP hop) spiked; the link to your router was clean".into(), "isp", "medium")
         } else if inet.is_some() && (in_gap.is_none() || overlaps(&inet, &in_gap, 500_000)) {
             ("Internet / ISP backbone: latency rose beyond your ISP's first hop".into(), "isp", "low")
         } else if server.is_some() && (in_gap.is_none() || overlaps(&server, &in_gap, 500_000)) {
@@ -964,9 +1010,10 @@ pub fn analyze(d: &Data) -> Analysis {
         }
     }
 
-    res.frames = frame_analysis(d, &phases, &mut an);
+    res.away = away_intervals(&d.focus, d.duration_us);
+    res.frames = frame_analysis(d, &phases, &res.away, &mut an);
     for a in an.iter_mut().filter(|a| a.kind == Kind::FrameHitch) {
-        a.in_match = in_phases(&phases, a.t);
+        a.in_match = in_phases(&phases, a.t) && !in_any(&res.away, a.t);
     }
     res.beacons = beacons(d, &servers);
     // The game pings all regions at once (hundreds of packets within ~10 ms): mark those
@@ -993,7 +1040,11 @@ pub fn analyze(d: &Data) -> Analysis {
     let order = ["gateway", "hop2", "internet", "server"];
     res.probes.sort_by_key(|p| order.iter().position(|o| *o == p.target).unwrap_or(9));
     res.wifi_counters_bogus = wifi_counters_bogus(d);
-    wifi_anomalies(d, res.wifi_counters_bogus, &mut an);
+    // On a cable an idle Wi-Fi adapter still scans now and then: not a suspect.
+    let wired = d.meta["route"]["is_wifi"].as_bool() == Some(false);
+    if !wired {
+        wifi_anomalies(d, res.wifi_counters_bogus, &mut an);
+    }
     system_anomalies(d, &mut an);
     if !d.events.iter().any(|e| e.kind == "exp") {
         driver_anomalies(d, &mut an);
@@ -1005,7 +1056,7 @@ pub fn analyze(d: &Data) -> Analysis {
     let gaps: Vec<&Anomaly> = an.iter().filter(|a| a.kind == Kind::InGap && a.in_match && a.value >= 100.0).collect();
     let mut c = BTreeMap::new();
     if !gaps.is_empty() {
-        c.insert("gateway (Wi-Fi hop) spike/loss".into(), corr(&an, &gaps, PROBE, Some("gateway"), 300_000, 300_000));
+        c.insert(GW_KEY.into(), corr(&an, &gaps, PROBE, Some("gateway"), 300_000, 300_000));
         c.insert("ISP hop2 spike/loss".into(), corr(&an, &gaps, PROBE, Some("hop2"), 300_000, 300_000));
         c.insert("internet (1.1.1.1) spike/loss".into(), corr(&an, &gaps, PROBE, Some("internet"), 300_000, 300_000));
         c.insert("server-path spike/loss".into(), corr(&an, &gaps, PROBE, Some("server"), 300_000, 300_000));
@@ -1079,7 +1130,7 @@ pub fn analyze(d: &Data) -> Analysis {
     }
     res.wifi_check = super::experiments::from_session(d);
     res.driver_cmds = driver_cmd_correlation(d, &an);
-    res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1)).collect();
+    res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1, !wired)).collect();
     res.anomalies = an;
     super::findings::summarize(d, &mut res);
     res

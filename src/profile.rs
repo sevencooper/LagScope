@@ -131,7 +131,12 @@ pub fn setting(key: &str) -> Option<serde_json::Value> {
 pub fn set_setting(key: &str, value: serde_json::Value) {
     let Some(p) = settings_path() else { return };
     let mut all: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    all.insert(key.into(), value);
+    // Null removes the setting.
+    if value.is_null() {
+        all.remove(key);
+    } else {
+        all.insert(key.into(), value);
+    }
     let _ = std::fs::create_dir_all(p.parent().unwrap());
     let _ = std::fs::write(p, serde_json::Value::Object(all).to_string());
 }

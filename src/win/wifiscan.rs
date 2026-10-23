@@ -185,7 +185,7 @@ pub fn summarise(entries: &[(Vec<u8>, [u8; 6], i32, u32)], own_ssid: &[u8], own_
             "5 GHz" => vec![36, 40, 44, 48, 149, 153, 157, 161],
             _ => chans.clone(),
         };
-        let best = candidates.iter().map(|&c| (c, round1(score_at(c)))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let best = candidates.iter().map(|&c| (c, round1(score_at(c)))).min_by(|a, b| a.1.total_cmp(&b.1));
         if band == res.own_band {
             res.own_channel_neighbours = nets.iter().filter(|n| n.1 == res.own_channel).count() as u32;
             res.own_channel_score = round1(score_at(res.own_channel));

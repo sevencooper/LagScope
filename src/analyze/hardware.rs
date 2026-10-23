@@ -9,9 +9,19 @@ use serde_json::Value;
 use super::health::Checks;
 use super::load::Data;
 
+/// Laptop (or tablet) by Windows' PC type; a battery alone is not proof (desktops on a USB
+/// UPS report one too).
+pub fn is_laptop(d: &Data) -> bool {
+    match d.meta["hardware"]["pc_type"].as_i64() {
+        Some(2 | 8) => true,
+        Some(1 | 3..=7) => false,
+        _ => d.meta["power"]["has_battery"].as_bool() == Some(true),
+    }
+}
+
 pub fn findings(d: &Data, f: &mut Vec<String>, rec: &mut Vec<String>, c: &mut Checks) {
     let hw = &d.meta["hardware"];
-    let laptop = d.meta["power"]["has_battery"].as_bool() == Some(true) || hw["pc_type"].as_i64() == Some(2);
+    let laptop = is_laptop(d);
     if hw.is_object() {
         memory(hw, laptop, f, rec, c);
         drives(hw, f, rec, c);
@@ -69,14 +79,25 @@ pub fn rated_speed(part: &str) -> Option<u32> {
     v.filter(|s| (1600..=10_000).contains(s))
 }
 
-/// Memory channel from a slot name such as DIMM_A2, DIMMB1 or DDR5_A2.
-fn channel(slot: &str) -> Option<char> {
+/// Memory channel of a stick, from its slot and bank labels, which differ by board:
+/// "DIMM_A2" / "DIMMB1" / "DDR5_A1" (letter before the slot number), "P0 CHANNEL A" (AMD
+/// bank label), "Controller1-ChannelA-DIMM1" (Intel: the controller is part of the channel).
+/// None when the labels say nothing about channels (e.g. "DIMM 1" and "BANK 0").
+fn channel(slot: &str, bank: &str) -> Option<String> {
+    for label in [slot, bank] {
+        let u = label.trim().to_ascii_uppercase();
+        if let Some(i) = u.find("CHANNEL") {
+            let letter = u[i + 7..].trim_start_matches([' ', '_', '-']).chars().next().filter(|c| c.is_ascii_alphabetic())?;
+            let controller = u.find("CONTROLLER").map(|c| u[c + 10..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>()).unwrap_or_default();
+            return Some(format!("{controller}{letter}"));
+        }
+    }
     let s = slot.trim().to_ascii_uppercase();
     let mut rev = s.chars().rev();
     let (digit, letter) = (rev.next()?, rev.next()?);
     let before: String = rev.collect::<Vec<_>>().into_iter().rev().collect();
     (digit.is_ascii_digit() && ('A'..='D').contains(&letter) && (before.is_empty() || before.ends_with("DIMM") || before.ends_with(['_', '-', ' '])))
-        .then_some(letter)
+        .then(|| letter.to_string())
 }
 
 fn memory(hw: &Value, laptop: bool, f: &mut Vec<String>, rec: &mut Vec<String>, c: &mut Checks) {
@@ -145,10 +166,10 @@ fn memory(hw: &Value, laptop: bool, f: &mut Vec<String>, rec: &mut Vec<String>, 
             rec.push("Three RAM sticks are installed, so part of the memory runs single-channel: use two or four matching sticks.".into());
             bad.push("three RAM sticks".into());
         } else if n == 2 {
-            let ch: Vec<Option<char>> = sticks.iter().map(|m| channel(m["slot"].as_str().unwrap_or(""))).collect();
-            if let (Some(a), Some(b)) = (ch[0], ch[1]) {
+            let ch: Vec<Option<String>> = sticks.iter().map(|m| channel(m["slot"].as_str().unwrap_or(""), m["bank"].as_str().unwrap_or(""))).collect();
+            if let (Some(a), Some(b)) = (&ch[0], &ch[1]) {
                 if a == b {
-                    rec.push(format!("Both RAM sticks are in channel {a}, so memory runs single-channel: move one to the other channel (the motherboard manual names the slots for two sticks, usually A2 and B2)."));
+                    rec.push("Both RAM sticks are in the same memory channel, so memory runs single-channel: move one to the other channel (the motherboard manual names the slots for two sticks, usually A2 and B2).".into());
                     bad.push("both RAM sticks in one channel".into());
                 }
             }
@@ -252,14 +273,24 @@ fn gpu_link(d: &Data, f: &mut Vec<String>, rec: &mut Vec<String>, c: &mut Checks
         let max_gen = dev["max_pcie_gen"].as_f64().unwrap_or(lg);
         let max_width = dev["max_pcie_width"].as_f64().unwrap_or(width);
         let link = format!("PCIe {lg:.0}.0 x{width:.0}");
-        f.push(format!("Graphics card link under load: {link} (card and slot support {max_gen:.0}.0 x{max_width:.0})."));
-        if width < max_width || width <= 4.0 {
-            rec.push(format!("The graphics card runs with only {width:.0} PCIe lanes{}: make sure it sits in the top long slot (the one nearest the CPU) and is pushed in fully; on some boards an M.2 drive in a shared slot halves the lanes.", if width < max_width { format!(" instead of {max_width:.0}") } else { String::new() }));
-            c.hardware.push(format!("graphics card at x{width:.0}"));
-        } else if lg < max_gen {
-            rec.push(format!("The graphics card link runs at PCIe {lg:.0}.0 instead of {max_gen:.0}.0: if it is on a riser cable, the riser may be limiting it; otherwise set the slot's PCIe mode to Auto in the BIOS and reseat the card."));
-            c.hardware.push(format!("graphics card at PCIe {lg:.0}.0"));
+        // NVML's maximum is what the card supports, not the slot. Judge the actual bandwidth:
+        // below PCIe 4.0 x8 / 3.0 x16 (~16 GB/s) costs games noticeable performance; above
+        // that, fewer lanes than the card supports is worth a note only.
+        let per_lane = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0][(lg as usize).min(6)];
+        let gbps = per_lane * width;
+        if gbps < 15.0 && (lg < max_gen || width < max_width) {
+            let fix = if width < max_width {
+                "make sure it sits in the top long slot (the one nearest the CPU) and is pushed in fully; on some boards an M.2 drive in a shared slot takes lanes away"
+            } else {
+                "if it is on a riser cable, the riser may be limiting it; otherwise set the slot's PCIe mode to Auto in the BIOS and reseat the card"
+            };
+            rec.push(format!("The graphics card's connection runs at only {link} (the card supports {max_gen:.0}.0 x{max_width:.0}), which costs performance: {fix}."));
+            c.hardware.push(format!("graphics card link {link}"));
+        } else if lg < max_gen || width < max_width {
+            f.push(format!("The graphics card runs at {link} instead of {max_gen:.0}.0 x{max_width:.0}; at this speed the difference is only a few percent."));
+            c.hardware_ok.push(format!("GPU {link}"));
         } else {
+            f.push(format!("Graphics card link under load: {link}, the most the card supports."));
             c.hardware_ok.push(format!("GPU {link}"));
         }
     }
@@ -310,12 +341,17 @@ mod tests {
 
     #[test]
     fn slots() {
-        assert_eq!(channel("DIMM_A2"), Some('A'));
-        assert_eq!(channel("DIMMB2"), Some('B'));
-        assert_eq!(channel("DDR5_A1"), Some('A'));
-        assert_eq!(channel("ChannelA-DIMM0"), None);
-        assert_eq!(channel("DIMM 1"), None);
-        assert_eq!(channel("P0 CHANNEL A"), None);
+        let ch = |s: &str, b: &str| channel(s, b);
+        assert_eq!(ch("DIMM_A2", "P0 CHANNEL A").as_deref(), Some("A"));
+        assert_eq!(ch("DIMMB2", "").as_deref(), Some("B"));
+        assert_eq!(ch("DDR5_A1", "BANK 0").as_deref(), Some("A"));
+        assert_eq!(ch("DIMM 1", "P0 CHANNEL B").as_deref(), Some("B"));
+        assert_eq!(ch("ChannelA-DIMM0", "BANK 0").as_deref(), Some("A"));
+        // Intel DDR5: same letter on two controllers is a correct dual-channel setup.
+        assert_ne!(ch("Controller0-ChannelA-DIMM1", "BANK 0"), ch("Controller1-ChannelA-DIMM1", "BANK 0"));
+        assert_eq!(ch("Controller0-ChannelA-DIMM0", ""), ch("Controller0-ChannelA-DIMM1", ""));
+        assert_eq!(ch("DIMM 1", "BANK 0"), None);
+        assert_eq!(ch("DIMM 0", ""), None);
     }
 
     #[test]

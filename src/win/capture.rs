@@ -106,10 +106,14 @@ pub fn start(cfg: Config, hooks: Option<Hooks>, console_input: bool) -> Result<C
     add("procwatch", Ok(procwatch::start(app.clone())));
     add("net", net::start(app.clone()));
     add("frames", frames::start(app.clone()));
+    add("focus", Ok(super::focus::start(app.clone())));
     if app.cfg.probes {
         add("probes", Ok(probes::start(app.clone())));
     }
-    add("wifi", wifi::start(app.clone()).ok_or_else(|| anyhow::anyhow!("unavailable")));
+    // No Wi-Fi adapter is normal on a desktop: logged as an event, not shown as a failure.
+    if let Some(w) = wifi::start(app.clone()) {
+        add("wifi", Ok(w));
+    }
     add("wlan_etw", super::wlan_etw::start(app.clone()));
     add("wifi_driver", super::wlan_etw::start_ndis(app.clone()));
     add("stall", Ok(stall::start(app.clone())));
@@ -347,6 +351,7 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
         out.push(format!("Ping:   {} {DIM}(avg/max 10s){RESET}", ping.join("  ")));
     }
     let wifi = match (&l.wifi, l.wifi_location_blocked, l.wifi_etw_quality) {
+        _ if l.wired.is_some() => l.wired.clone().unwrap_or_default(),
         (_, true, q) => format!(
             "link quality {} {YELLOW}(details need Location services ON){RESET}",
             q.map(|q| q.to_string()).unwrap_or("?".into())
@@ -356,14 +361,15 @@ fn status_lines(app: &App, elapsed: Duration) -> Vec<String> {
         _ => "-".into(),
     };
     out.push(format!(
-        "Wi-Fi:  {wifi}   stall max {:.1} ms{}",
+        "{}  {wifi}   stall max {:.1} ms{}",
+        if l.wired.is_some() { "Net:  " } else { "Wi-Fi:" },
         l.stall_max_ms,
         l.top_talker.map(|t| format!("   other traffic: {YELLOW}{t}{RESET}")).unwrap_or_default()
     ));
     out.push(format!(
         "System: {}   {}",
         l.cpu.unwrap_or_else(|| "-".into()),
-        l.gpu.unwrap_or_else(|| "-".into())
+        l.gpu.or(l.gpu_engines).unwrap_or_else(|| "-".into())
     ));
     if let Some(d) = &l.drivers {
         out.push(format!("Drivers: DPC/ISR {d} {DIM}(last 10 s){RESET}"));

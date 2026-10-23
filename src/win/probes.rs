@@ -438,9 +438,18 @@ pub fn start(app: Arc<App>) -> Running {
         let hops = traceroute(internet_ip, 16);
         hops_csv(&trace_sink, t, internet_ip, &hops);
         let gw = *gateway.addr.lock().unwrap();
-        let isp = hops.iter().filter_map(|h| h.ip).find(|ip| Some(*ip) != gw && *ip != internet_ip);
-        if let Some(ip) = isp {
-            *hop2.addr.lock().unwrap() = Some(ip);
+        let beyond: Vec<Ipv4Addr> = hops.iter().filter_map(|h| h.ip).filter(|ip| Some(*ip) != gw && *ip != internet_ip).collect();
+        // The first public hop is the ISP. Private ones before it are usually a second
+        // router (e.g. the ISP's gateway in front of your own router); probing one of those
+        // as "ISP" would blame the provider for it.
+        let private = |ip: &Ipv4Addr| ip.is_private() || ip.is_link_local();
+        let inner: Vec<Ipv4Addr> = beyond.iter().copied().take_while(|ip| private(ip)).collect();
+        if !inner.is_empty() {
+            a.session.event("route", format!("private hop(s) after the router: {}", inner.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")));
+            a.session.meta_set("inner_routers", serde_json::json!(inner.iter().map(|i| i.to_string()).collect::<Vec<_>>()));
+        }
+        if let Some(ip) = beyond.iter().find(|ip| !private(ip)).or(beyond.first()) {
+            *hop2.addr.lock().unwrap() = Some(*ip);
             a.session.event("route", format!("ISP-side hop2 = {ip}"));
         }
         a.session.meta_set("traceroute_internet", serde_json::to_value(&hops).unwrap_or_default());
