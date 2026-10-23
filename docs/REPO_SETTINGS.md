@@ -15,6 +15,7 @@ maintainer's own work.
 | New pushes dismiss earlier approvals | A PR cannot be changed after it was approved. |
 | All review conversations resolved | Open questions are not merged by accident. |
 | CI checks `linux` and `windows` must pass | Tests and the Windows build run on every PR. |
+| Check `no-chat-links` must pass | No links to AI chat sessions in PR titles, descriptions, commit messages or files. |
 | No force pushes, no deletion, linear history | History is never rewritten; squash merges only. |
 | Bypass: repository admins, for pull requests only | The maintainer can merge their own PRs (nobody else can approve them), but cannot push to `main` directly. |
 

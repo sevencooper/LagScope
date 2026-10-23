@@ -1,0 +1,38 @@
+# Blocks links to Claude chats / sessions in pull request titles and descriptions, commit
+# messages and files. A required check for merging into main (see docs/REPO_SETTINGS.md).
+# Runs again when a PR description is edited.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  no-chat-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: No links to Claude chats
+        env:
+          PR_TEXT: ${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          pat='claude\.ai/(code|chat)|Claude-Session:'
+          fail=0
+          if printf '%s' "$PR_TEXT" | grep -qiE "$pat"; then
+            echo "::error::The pull request title or description links to a Claude chat."; fail=1
+          fi
+          if [ -n "$BASE" ] && git log --format=%B "$BASE..HEAD" | grep -qiE "$pat"; then
+            echo "::error::A commit message links to a Claude chat."; fail=1
+          fi
+          if git grep -niE "$pat" -- . ':!.github/workflows/checks.yml'; then
+            echo "::error::A file links to a Claude chat."; fail=1
+          fi
+          exit $fail
