@@ -388,8 +388,12 @@ mod tests {
         .unwrap();
         let a = analyze(&load::load(&s.dir).unwrap());
         let rec = a.recommendations.join("\n");
-        for k in ["XMP", "single-channel", "plugged into the motherboard", "PCIe 3.0 x8", "power limit", "only 6 GB free", "Maximum processor state", "over a year old", "Game Bar"] {
+        for k in ["XMP", "single-channel", "plugged into the motherboard", "PCIe 3.0 x8", "power limit", "only 6 GB free", "Maximum processor state"] {
             assert!(rec.contains(k), "{k}: {rec}");
+        }
+        // Informational: notes, not advice.
+        for k in ["over a year old", "Game Bar"] {
+            assert!(!rec.contains(k) && a.findings.iter().any(|f| f.contains(k)), "{k}");
         }
         assert!(a.findings.iter().any(|f| f.contains("hard disk is installed (D:)")), "{:#?}", a.findings);
         let hw = a.health.iter().find(|h| h.area == "Hardware setup").unwrap();

@@ -616,7 +616,10 @@ impl GuiApp {
                     }
                     if !recs.is_empty() {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("What to try").strong());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("What to try").strong());
+                            hint(ui, "based on what this recording measured; worth a try, none is guaranteed to help");
+                        });
                         for r in recs.iter().take(3) {
                             ui.add(egui::Label::new(format!("• {}", r.replace('`', ""))).wrap());
                         }

@@ -251,16 +251,25 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
             ));
         }
     }
-    if r.gap_correlation.get("other traffic burst").copied().unwrap_or(0.0) >= 0.3 {
+    // Other traffic during game stalls: only with a few stalls to go on, naming the programs
+    // that were busy around those stalls.
+    let stalls: Vec<&super::detect::Anomaly> = r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match && a.value >= 100.0).collect();
+    if stalls.len() >= 3 && r.gap_correlation.get("other traffic burst").copied().unwrap_or(0.0) >= 0.3 {
         let mut names: BTreeMap<String, usize> = BTreeMap::new();
-        for a in r.anomalies.iter().filter(|a| a.kind == Kind::TrafficBurst) {
-            *names.entry(a.target.clone()).or_default() += 1;
+        let mut hit = 0;
+        for g in &stalls {
+            let near: Vec<&str> = r.anomalies.iter().filter(|a| a.kind == Kind::TrafficBurst && a.t <= g.end() + 1_000_000 && a.end() >= g.t - 2_000_000).map(|a| a.target.as_str()).collect();
+            hit += !near.is_empty() as usize;
+            for n in near {
+                *names.entry(n.to_string()).or_default() += 1;
+            }
         }
         let mut v: Vec<_> = names.into_iter().collect();
         v.sort_by_key(|x| std::cmp::Reverse(x.1));
-        let top: Vec<String> = v.iter().take(3).map(|(n, c)| format!("{n} ({c}×)")).collect();
+        let top: Vec<&str> = v.iter().take(3).map(|(n, _)| n.as_str()).collect();
         rec.push(format!(
-            "Other programs were moving a lot of data during stalls ({}). Pause downloads/sync while playing, or enable SQM/QoS (\"bufferbloat\" control) on the router.",
+            "{hit} of {} game stalls came while other programs were moving a lot of data ({}). Pausing downloads and sync while playing, or turning on SQM / QoS (\"bufferbloat\" control) on the router, may help.",
+            stalls.len(),
             top.join(", ")
         ));
     }
@@ -326,7 +335,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         rec.push("LagScope was not run as administrator, so game traffic and frame data are missing. Right-click > Run as administrator.".into());
     }
     if d.meta["wifi_location_blocked"].as_bool() == Some(true) {
-        rec.push("Windows Location services were off, so RSSI / PHY rate / roaming details were not available (link quality and scan events were still recorded). For richer Wi-Fi data, turn on Settings > Privacy & security > Location > Location services and 'Let desktop apps access your location' for the test session.".into());
+        f.push("Windows Location services were off, so RSSI / PHY rate / roaming details were not available (link quality and scan events were still recorded). For richer Wi-Fi data, turn on Settings > Privacy & security > Location > Location services and 'Let desktop apps access your location' for the test session.".into());
     }
     if let Ok(e) = std::fs::read_to_string(d.dir.join("errors.txt")) {
         f.push(format!("LagScope hit an internal error while recording, so some data may be missing: {}", e.lines().next().unwrap_or("")));
@@ -346,15 +355,23 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         if !boosters.is_empty() {
             let adapter = format!("{} {}", d.meta["route"]["adapter"].as_str().unwrap_or(""), d.meta["route"]["description"].as_str().unwrap_or("")).to_ascii_lowercase();
             let tunnel = ["vpn", "nord", "tap", "tun", "wireguard", "tailscale", "zerotier", "warp", "wintun"].iter().any(|k| adapter.contains(k));
-            rec.push(format!(
-                "Network-altering software is running ({}){}. Try a session with it fully closed/disabled.",
+            let text = format!(
+                "Network-altering software is running ({}){}.",
                 boosters.iter().map(|s| **s).collect::<Vec<_>>().join(", "),
-                if tunnel { " and traffic is routed through it" } else { " (traffic was not routed through a tunnel, but such services can still install network filters)" }
-            ));
+                if tunnel { " and traffic is routed through it" } else { " (traffic was not routed through it)" }
+            );
+            // Only advice when the network actually misbehaved or the game goes through it.
+            let net_trouble = gw_unstable || upload_issue || s.gaps_100ms >= 3;
+            if tunnel || net_trouble {
+                rec.push(format!("{text} If the lag continues, try a session with it fully closed; such services can add delay even when traffic is not routed through them."));
+            } else {
+                f.push(text);
+            }
         }
     }
-    if d.marks.is_empty() {
-        rec.push("No lag spikes were marked. Next time press the hotkey right when a hiccup happens - marks make the diagnosis far more precise.".into());
+    // A tip only for recordings with a game in them.
+    if d.marks.is_empty() && (s.in_packets > 0 || r.frames.frames > 100) {
+        rec.push("No lag spikes were marked. Next time, press the mark key when a hiccup happens: marks make the diagnosis much more precise.".into());
     }
 
     // Headline from mark verdicts, else from correlations.
@@ -393,9 +410,6 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         "No significant problems detected in this session.".into()
     };
 
-    if !r.verdicts.is_empty() || s.gaps_100ms > 0 {
-        rec.push("Compare with a control session: record a game that feels fine (pick it on the Record tab, or use Auto-detect) and compare the two reports.".into());
-    }
     if !is_wifi && (gw_unstable || upload_issue || headline.contains("link to the router")) {
         rec.insert(0, "The link between the PC and the router is what stalls. If the PC connects through a powerline adapter, a mesh node or a switch, test with a cable straight to the router; otherwise try another cable and router port, update the network adapter's driver, and restart the router.".into());
     }

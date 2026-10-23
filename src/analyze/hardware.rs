@@ -25,10 +25,9 @@ pub fn findings(d: &Data, f: &mut Vec<String>, rec: &mut Vec<String>, c: &mut Ch
     if hw.is_object() {
         memory(hw, laptop, f, rec, c);
         drives(hw, f, rec, c);
-        software_age(d, hw, f, rec);
+        software_age(d, hw, f);
         if hw["background_recording"].as_i64() == Some(1) {
-            f.push("Xbox Game Bar records in the background (\"Record what happened\").".into());
-            rec.push("Xbox Game Bar keeps recording in the background, which costs some performance: turn it off in Settings > Gaming > Captures if you don't use it.".into());
+            f.push("Xbox Game Bar records in the background (\"Record what happened\"), which costs a little performance; it can be turned off in Settings > Gaming > Captures if you don't use it.".into());
         }
         if hw["memory_integrity"].as_bool() == Some(true) {
             f.push("Memory integrity (Core isolation) is on: a security feature that costs a few percent of performance in some games.".into());
@@ -215,7 +214,7 @@ fn days(s: &str) -> Option<i64> {
     Some(era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468)
 }
 
-fn software_age(d: &Data, hw: &Value, f: &mut Vec<String>, rec: &mut Vec<String>) {
+fn software_age(d: &Data, hw: &Value, f: &mut Vec<String>) {
     let Some(today) = d.meta["start_local"].as_str().and_then(days) else { return };
     let gpus: Vec<&Value> = hw["gpus"].as_array().map(|g| g.iter().collect()).unwrap_or_default();
     // The card that renders games: the discrete one if there is one.
@@ -223,8 +222,7 @@ fn software_age(d: &Data, hw: &Value, f: &mut Vec<String>, rec: &mut Vec<String>
     if let Some(g) = main {
         let date = g["driver_date"].as_str().unwrap_or("");
         if days(date).is_some_and(|x| today - x > 365) {
-            f.push(format!("The graphics driver ({}) is from {date}.", g["name"].as_str().unwrap_or("")));
-            rec.push(format!("Your graphics driver is over a year old ({}): updating it often fixes stutter in newer games.", &date[..7]));
+            f.push(format!("The graphics driver ({}) is from {date}, over a year old; newer drivers often fix stutter in recent games.", g["name"].as_str().unwrap_or("")));
         }
     }
     if let Some(date) = hw["bios_date"].as_str().filter(|b| days(b).is_some_and(|x| today - x > 3 * 365)) {
