@@ -6,6 +6,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+## 0.5.1 (2026-10-23)
+
 - **Calmer advice:** "What to try" only lists things this recording points to, with a note
   that none is guaranteed to help. High "committed" memory (reserved, not in use; Task
   Manager shows RAM in use instead) is now a note rather than a warning; the Memory line warns
