@@ -1114,7 +1114,7 @@ impl GuiApp {
                 });
                 ui.add(egui::Label::new(RichText::new(&r.headline).color(headline_color(ui, &r.headline))).wrap());
                 if !r.warn.is_empty() {
-                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).small().color(Color32::from_rgb(235, 185, 90)));
+                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).size(12.5).color(Color32::from_rgb(235, 185, 90)));
                 }
             });
         }
