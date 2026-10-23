@@ -34,6 +34,8 @@ USAGE:
     lagscope.exe --undo               undo the settings changes LagScope was told to keep
     lagscope.exe analyze <DIR>        (re)build report.html for a recorded session
     lagscope.exe compare <A> <B>      compare two recorded sessions side by side
+    lagscope.exe summary <dir>        a recording's result as plain text (for a chat or forum)
+    lagscope.exe ai-prompt <dir>      a prompt for an AI assistant, to paste with the zip
     lagscope.exe dump-etw <net|dxgi> [SECS] [MAX]
                                       print raw decoded ETW events (debugging)
 
@@ -212,6 +214,14 @@ fn main() -> Result<()> {
             let (Some(a), Some(b)) = (args.get(1), args.get(2)) else { bail!("usage: lagscope compare <session A> <session B>") };
             let c = analyze::compare::compare(std::path::Path::new(a), std::path::Path::new(b))?;
             print!("{}", analyze::compare::to_text(&c));
+            Ok(())
+        }
+        Some(cmd @ ("summary" | "ai-prompt")) => {
+            let Some(dir) = args.get(1) else { bail!("usage: lagscope {cmd} <session dir>") };
+            let dir = std::path::Path::new(dir);
+            let text = if cmd == "summary" { analyze::share::summary_text(dir) } else { analyze::share::ai_prompt(dir) };
+            let Some(text) = text else { bail!("{} has no analysis yet: run `lagscope analyze` on it first", dir.display()) };
+            print!("{text}");
             Ok(())
         }
         Some("analyze") => {

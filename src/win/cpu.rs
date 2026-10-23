@@ -132,7 +132,8 @@ fn sample_loop(app: Arc<App>) {
                 array(cores).into_iter().filter(|(n, _)| !n.contains("_Total")).collect();
             let max_core = per_core.iter().map(|(_, v)| *v).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
             for (n, v) in &per_core {
-                row!(core_sink, "{t},{n},{v:.1}");
+                // Names are "group,number": quoted so the row keeps three columns.
+                row!(core_sink, "{t},{},{v:.1}", crate::session::csv_escape(n));
             }
             // Game figures come from the process watcher (no per-process counters here:
             // PDH's Process object walks every process and was the costliest part).

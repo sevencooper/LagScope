@@ -312,7 +312,7 @@ pub fn start(app: Arc<App>) -> Option<Running> {
                 continue;
             }
             let Some(c) = conn.filter(|c| c.isState == wlan_interface_state_connected) else {
-                row!(sink, "{t},0,,,,,,,,,,,,,,,,,,");
+                row!(sink, "{t},0,,,,,,,,,,,,,,,,,");
                 a.live.lock().unwrap().wifi = Some("disconnected".into());
                 continue;
             };

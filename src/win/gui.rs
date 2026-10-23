@@ -133,6 +133,8 @@ struct GuiApp {
     summary: Option<(PathBuf, Vec<String>, Vec<String>, Vec<HealthRow>)>,
     /// Re-analysis running in the background (sessions list reloads when it finishes).
     reanalyzing: Arc<std::sync::atomic::AtomicUsize>,
+    /// Recording whose summary / AI prompt was just copied (shows "Copied" for a moment).
+    copied: Option<(PathBuf, Instant)>,
     net_router: JobRef<super::router::RouterInfo>,
     net_load: JobRef<super::loadtest::LoadResult>,
     net_scan: JobRef<super::wifiscan::ScanResult>,
@@ -257,6 +259,7 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
                 selftest,
                 summary: None,
                 reanalyzing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                copied: None,
                 net_router: Arc::default(),
                 net_load: Arc::default(),
                 net_scan: Arc::default(),
@@ -482,6 +485,14 @@ impl GuiApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.toggle_value(&mut self.show_log, "Log").on_hover_text("Technical messages");
+                if ui
+                    .link("Bug or idea?")
+                    .on_hover_text("Experienced a bug? Thought of an improvement? Make an issue over at our GitHub.")
+                    .clicked()
+                {
+                    // Through explorer, so the browser does not start with LagScope's admin rights.
+                    super::open_path(std::path::Path::new(&format!("{}/issues/new/choose", env!("CARGO_PKG_REPOSITORY"))));
+                }
             });
         });
     }
@@ -584,9 +595,13 @@ impl GuiApp {
                         if ui.button("Show files").on_hover_text(f.dir.display().to_string()).clicked() {
                             super::open_path(&f.dir);
                         }
+                        if share_buttons(ui, &f.dir).is_some() {
+                            self.copied = Some((f.dir.clone(), Instant::now()));
+                        }
+                        copied_note(ui, &self.copied, &f.dir);
                     });
                     if let Some(z) = &f.zip {
-                        hint(ui, &format!("To share it, send {} from that folder.", z.file_name().unwrap_or_default().to_string_lossy()));
+                        hint(ui, &format!("To share it, send {} from that folder. For an AI assistant's opinion, attach the zip and paste the copied AI prompt.", z.file_name().unwrap_or_default().to_string_lossy()));
                     }
                 });
                 if self.summary.as_ref().is_none_or(|x| x.0 != f.dir) {
@@ -1049,6 +1064,7 @@ impl GuiApp {
         });
         let mut redo: Option<PathBuf> = None;
         let mut toggle: Option<PathBuf> = None;
+        let mut copied: Option<PathBuf> = None;
         for r in &self.sessions {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1069,6 +1085,17 @@ impl GuiApp {
                                 super::open_path(&r.dir);
                                 ui.close();
                             }
+                            if r.game != "Network test" {
+                                if let Some(what) = share_buttons(ui, &r.dir) {
+                                    copied = Some(r.dir.clone());
+                                    // Older recordings lack the guide the prompt refers to: rebuild
+                                    // the report (which writes it) and the zip.
+                                    if what == Share::Prompt && !r.dir.join("AI_GUIDE.md").exists() {
+                                        redo = Some(r.dir.clone());
+                                    }
+                                    ui.close();
+                                }
+                            }
                             if ui
                                 .add_enabled(r.dir.join("meta.json").exists(), egui::Button::new("Rebuild report"))
                                 .on_hover_text("Re-run the analysis with this version of LagScope")
@@ -1082,6 +1109,7 @@ impl GuiApp {
                         if ui.add_enabled(report.exists(), egui::Button::new("Open report")).clicked() {
                             super::open_path(&report);
                         }
+                        copied_note(ui, &self.copied, &r.dir);
                     });
                 });
                 ui.add(egui::Label::new(RichText::new(&r.headline).color(headline_color(ui, &r.headline))).wrap());
@@ -1089,6 +1117,9 @@ impl GuiApp {
                     ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).small().color(Color32::from_rgb(235, 185, 90)));
                 }
             });
+        }
+        if let Some(dir) = copied {
+            self.copied = Some((dir, Instant::now()));
         }
         if let Some(dir) = toggle {
             if let Some(i) = self.compare_pick.iter().position(|d| *d == dir) {
@@ -1108,8 +1139,15 @@ impl GuiApp {
             busy.fetch_add(1, Ordering::Relaxed);
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
-                if let Err(e) = crate::analyze::run(&dir) {
-                    crate::ui::log(format!("Re-analysis of {} failed: {e:#}", dir.display()));
+                match crate::analyze::run(&dir) {
+                    // Keep the zip that gets shared in step with the new report.
+                    Ok(_) if dir.with_extension("zip").exists() => {
+                        if let Err(e) = crate::session::zip_dir(&dir) {
+                            crate::ui::log(format!("Could not update {}: {e:#}", dir.with_extension("zip").display()));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::ui::log(format!("Re-analysis of {} failed: {e:#}", dir.display())),
                 }
                 busy.fetch_sub(1, Ordering::Relaxed);
                 ctx.request_repaint();
@@ -1498,6 +1536,45 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Green for a clean result, amber when the report found something.
+#[derive(Clone, Copy, PartialEq)]
+enum Share {
+    Summary,
+    Prompt,
+}
+
+/// "Copy summary" (plain text for a chat or forum) and "Copy AI prompt" (to paste into an
+/// AI assistant together with the zip). Returns what was copied.
+fn share_buttons(ui: &mut egui::Ui, dir: &std::path::Path) -> Option<Share> {
+    let mut done = None;
+    if ui.button("Copy summary").on_hover_text("The result as plain text, to paste into a chat or forum post").clicked() {
+        if let Some(t) = crate::analyze::share::summary_text(dir) {
+            ui.ctx().copy_text(t);
+            done = Some(Share::Summary);
+        }
+    }
+    if ui
+        .button("Copy AI prompt")
+        .on_hover_text("A prompt for an AI assistant (ChatGPT, Claude, ...). Paste it and attach this recording's zip for an analysis beyond LagScope's own.")
+        .clicked()
+    {
+        if let Some(t) = crate::analyze::share::ai_prompt(dir) {
+            ui.ctx().copy_text(t);
+            done = Some(Share::Prompt);
+        }
+    }
+    done
+}
+
+/// "Copied" next to the buttons for a few seconds after copying.
+fn copied_note(ui: &mut egui::Ui, copied: &Option<(PathBuf, Instant)>, dir: &std::path::Path) {
+    if let Some((d, t)) = copied {
+        if d == dir && t.elapsed() < Duration::from_secs(3) {
+            ui.label(RichText::new("Copied").color(Color32::from_rgb(110, 210, 120)));
+            ui.ctx().request_repaint_after(Duration::from_secs(3));
+        }
+    }
+}
+
 fn headline_color(ui: &egui::Ui, h: &str) -> Color32 {
     if h.starts_with("No significant") || h.starts_with("No problems") {
         Color32::from_rgb(110, 210, 120)

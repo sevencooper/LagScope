@@ -257,4 +257,5 @@ pub fn render(d: &Data, a: &Analysis) -> String {
         .replace("/*UPLOT_JS*/", UPLOT_JS)
         .replace("/*DATA*/", &json)
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+        .replace("{{REPO}}", env!("CARGO_PKG_REPOSITORY"))
 }

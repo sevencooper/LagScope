@@ -40,7 +40,12 @@ Reports      Everything you recorded or tested. Tick two and click Compare to se
 Sharing a report
 ----------------
 Each recording also makes a LagScope_....zip (Reports -> More -> Show files).
-Send that zip to whoever is helping you.
+Send that zip to whoever is helping you, or click "Copy summary" and paste the
+result into a chat or forum post.
+
+Second opinion from an AI assistant (ChatGPT, Claude, ...): click "Copy AI
+prompt", paste it into the chat, fill in what you noticed, and attach the zip.
+The zip explains itself to the assistant (AI_GUIDE.md inside).
 
 
 Safe and private
@@ -51,7 +56,13 @@ Safe and private
 * Only the busy-connection test sends real traffic (to Cloudflare's speed test),
   and only when you click it.
 * The zip holds timing, ping, hardware and settings data and process names.
-  Wi-Fi names, MAC addresses, the PC name and the user name are removed.
+  Wi-Fi names, MAC addresses, the PC name, the user name and your public IPv6
+  address are removed. The names of your provider's routers stay in (they can
+  show your provider and rough region). Details: PRIVACY.md (next to this file).
+
+Experienced a bug? Thought of an improvement? Make an issue over at our GitHub:
+https://github.com/sevencooper/LagScope/issues (or click "Bug or idea?" at the
+top right of the window).
 
 If something goes wrong
 * The window does not open: right-click lagscope.exe -> Run as administrator.
@@ -70,3 +81,5 @@ Command line (optional; lagscope.exe --help lists everything)
   lagscope.exe load-test          busy-connection (bufferbloat) test
   lagscope.exe wifi-scan          nearby Wi-Fi
   lagscope.exe router             router / provider identification
+  lagscope.exe summary <folder>   a recording's result as plain text
+  lagscope.exe ai-prompt <folder> a prompt for an AI assistant (attach the zip)

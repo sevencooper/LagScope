@@ -1,0 +1,33 @@
+name: Bug report
+description: LagScope crashed, failed to record, or something in the window does not work.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LagScope version
+      description: Shown at the top of the window, e.g. 0.4.6.
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: e.g. Windows 11 24H2 (Settings > System > About).
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Click "Log" at the top right of the window and paste what it shows. If the recording folder has an errors.txt, paste that too.
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        If a recording was made, attaching its zip helps a lot. See [PRIVACY.md](../blob/main/PRIVACY.md) for what it contains.

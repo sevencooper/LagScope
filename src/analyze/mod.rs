@@ -9,6 +9,7 @@ pub mod hardware;
 pub mod health;
 pub mod load;
 pub mod report;
+pub mod share;
 
 use std::path::Path;
 
@@ -22,6 +23,7 @@ pub fn run(dir: &Path) -> Result<String> {
     let analysis = detect::analyze(&data);
     std::fs::write(dir.join("report.html"), report::render(&data, &analysis))?;
     std::fs::write(dir.join("analysis.json"), serde_json::to_string_pretty(&analysis)?)?;
+    share::write_ai_guide(dir)?;
 
     let mut out = String::new();
     out.push_str(&format!("\n== {} ==\n", analysis.headline));

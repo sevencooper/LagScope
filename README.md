@@ -11,6 +11,27 @@ Works on Wi-Fi and wired connections (on a cable, Wi-Fi events are ignored and t
 
 End-user instructions are in [README.txt](README.txt), which ships inside the release zip.
 
+| Recording | Result |
+|---|---|
+| ![Live view while recording](docs/screenshots/app_recording.png) | ![Result with the scorecard](docs/screenshots/app_result.png) |
+
+![Top of an HTML report](docs/screenshots/report.png)
+
+## Sharing a recording and AI analysis
+
+Every recording is also a zip, ready to send. For a quick post, **Copy summary** (on the result, or Reports > More) copies the verdict, the scorecard and the top suggestions as plain text.
+
+The built-in analysis is hand-written rules. For a second opinion, or a question it does not cover, give the zip to an AI assistant that can open files and run code (e.g. ChatGPT or Claude with file analysis):
+
+1. Click **Copy AI prompt** and paste it into the chat. It says what LagScope found, when you marked lag spikes, and what to check; fill in what you noticed.
+2. Attach the recording's zip.
+
+Each recording contains `AI_GUIDE.md`, which explains every file and column to the assistant (the same text as [docs/SESSION_FORMAT.md](docs/SESSION_FORMAT.md)). The same text is available from the command line: `lagscope summary <dir>` and `lagscope ai-prompt <dir>`.
+
+What a recording contains, and what is removed before it is saved: [PRIVACY.md](PRIVACY.md).
+
+Found a bug or have an idea? [Open an issue](https://github.com/sevencooper/LagScope/issues/new/choose) ("Bug or idea?" in the window links there too). How issues are handled and how to contribute code: [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md). What changed in each version: [CHANGELOG.md](CHANGELOG.md). For maintainers: [releasing](docs/RELEASING.md) and [repository settings](docs/REPO_SETTINGS.md). License: [MIT](LICENSE).
+
 ## Build
 
 The exe is cross-compiled from Linux or WSL. Windows itself only needs the finished exe.
@@ -63,11 +84,12 @@ A file with the same `id` as a built-in replaces it. The profile is saved in eac
 ## Develop
 
 - `cargo test`: analyzer tests (they run on Linux).
+- `lagscope summary <dir>` / `lagscope ai-prompt <dir>`: a recording's result as plain text, and the prompt for an AI assistant.
 - `cargo run --release -- analyze <session folder>`: rebuilds `report.html` from a recorded session. This lets you tweak the analysis without replaying a game.
 - `lagscope.exe --help`: capture options (hotkey, extra ping targets, duration, ...).
 - `lagscope.exe --record --game <id>`: record with a given profile (the menu remembers the last one).
 - `lagscope.exe wifi-inventory [--wu]`: read-only. Shows what the Wi-Fi check would test on this PC, and with `--wu` the driver updates Windows Update offers.
-- `lagscope.exe --gui-selftest <idle|record|close|prompt|wifi|compare|network|auto|reanalyze> <out dir>`: scripted GUI run. It saves screenshots (BMP) and `selftest.txt` with CPU and memory figures (the `record` run also logs steady-state CPU per thread), then closes. Pass `--out <dir>` to list reports from that folder. `wifi` runs a short Wi-Fi check, so settings change temporarily.
+- `lagscope.exe --gui-selftest <idle|record|close|prompt|wifi|compare|network|reanalyze> <out dir>`: scripted GUI run. It saves screenshots (BMP) and `selftest.txt` with CPU and memory figures (the `record` run also logs steady-state CPU per thread), then closes. Pass `--out <dir>` to list reports from that folder. `wifi` runs a short Wi-Fi check, so settings change temporarily.
 - `lagscope.exe --wifi-check --unattended --force-tests --check-secs 15`: runs every test with no questions and keeps nothing. Use this to try the check end to end.
 
 Layout:
@@ -81,5 +103,6 @@ Layout:
 - `src/analyze/health.rs`: PC-side checks (background CPU at hitches, CPU limits, memory, power, display, link) and the scorecard.
 - `src/analyze/hardware.rs`: hardware set up wrong (XMP/EXPO off, mixed or single RAM sticks, monitor on the motherboard, slow GPU link, lowered GPU power limit, full or spinning system drive, CPU capped by the power plan).
 - `src/analyze/compare.rs`: session comparison.
+- `src/analyze/share.rs`: "Copy summary", "Copy AI prompt" and the `AI_GUIDE.md` written into each recording.
 - `src/analyze/`: platform-independent analysis and report generation.
 - `src/report/`: the HTML template and the bundled uPlot charting library.

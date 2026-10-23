@@ -1,0 +1,28 @@
+name: Wrong or unclear diagnosis
+description: The report blamed the wrong thing, missed a problem, or its advice did not help.
+labels: [analysis]
+body:
+  - type: textarea
+    id: felt
+    attributes:
+      label: What you experienced
+      description: When the lag happened and what it looked like (rubber-banding, stutter, delayed hits, freezes), and any warning icons the game showed.
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: LagScope's result
+      description: In the window, click "Copy summary" (or Reports > More > Copy summary) and paste it here.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why you think it is wrong
+      description: e.g. the lag stayed after following the advice, or a test (Ethernet cable, other band, another game) points elsewhere.
+  - type: markdown
+    attributes:
+      value: |
+        Please attach the recording's zip (Reports > More > Show files). Without it the analysis cannot be checked. See [PRIVACY.md](../blob/main/PRIVACY.md) for what it contains.

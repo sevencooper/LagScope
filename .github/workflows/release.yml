@@ -1,0 +1,45 @@
+# Publishes a release when a version tag (v1.2.3) is pushed: checks that Cargo.toml and
+# CHANGELOG.md match the tag, tests, builds, packages and creates the GitHub release with
+# that version's CHANGELOG section as its notes. See docs/RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check version and changelog
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$v\"$" Cargo.toml || { echo "::error::Cargo.toml version is not $v"; exit 1; }
+          grep -q "^## $v " CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## $v (date)' section"; exit 1; }
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist/LagScope
+          cp target/release/lagscope.exe README.txt PRIVACY.md LICENSE dist/LagScope/
+          cd dist
+          7z a -tzip LagScope.zip LagScope > /dev/null
+          cp LagScope/lagscope.exe .
+          sha256sum LagScope.zip lagscope.exe > SHA256SUMS.txt
+      - name: Release notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v h="## $v " 'index($0, h) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          printf '\nSHA-256:\n```\n%s\n```\n' "$(cat dist/SHA256SUMS.txt)" >> notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/lagscope.exe dist/LagScope.zip dist/SHA256SUMS.txt --title "LagScope $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

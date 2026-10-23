@@ -29,6 +29,7 @@ h2 { font-size: 16px; margin: 28px 0 10px; }
 .score .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; transform: translateY(1px); }
 .score .ok .dot { background: var(--good); } .score .warn .dot { background: var(--warn); } .score .na .dot { background: var(--line); }
 .score b { white-space: nowrap; } .score .na { color: var(--muted); }
+a { color: var(--accent); }
 .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .tile .k { color: var(--muted); font-size: 12px; }
 .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -100,7 +101,7 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   <h2>Session log</h2>
   <div class="card tablewrap"><table id="events"><thead><tr><th>time</th><th>kind</th><th>detail</th></tr></thead><tbody></tbody></table></div>
   <details class="card"><summary>System details (meta.json)</summary><pre id="meta" style="white-space:pre-wrap;font-size:12px"></pre></details>
-  <div class="sub">LagScope {{VERSION}} · raw CSV data is in the session folder</div>
+  <div class="sub">LagScope {{VERSION}} · raw CSV data is in the session folder · Experienced a bug? Thought of an improvement? <a href="{{REPO}}/issues/new/choose">Make an issue on GitHub</a></div>
 </main>
 <script>/*UPLOT_JS*/</script>
 <script>

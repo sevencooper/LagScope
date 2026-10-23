@@ -99,7 +99,7 @@ fn redact_with(text: &str, names: &[String]) -> String {
         for n in names {
             line = replace_ci(&line, n, "<redacted>");
         }
-        out.push_str(&redact_macs(&line));
+        out.push_str(&redact_ipv6(&redact_macs(&line)));
         out.push('\n');
     }
     out
@@ -116,6 +116,28 @@ fn replace_ci(s: &str, pat: &str, with: &str) -> String {
         i += j + lp.len();
     }
     out.push_str(&s[i..]);
+    out
+}
+
+/// Replaces global IPv6 addresses (2000::/3): unlike IPv4 behind a router, they are public
+/// and identify the connection. Link-local (fe80::) and private (fd..) ones are kept.
+fn redact_ipv6(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut tok = String::new();
+    let flush = |tok: &mut String, out: &mut String| {
+        let global = tok.matches(':').count() >= 2 && tok.parse::<std::net::Ipv6Addr>().is_ok_and(|a| a.segments()[0] & 0xe000 == 0x2000);
+        out.push_str(if global { "<ipv6 redacted>" } else { tok });
+        tok.clear();
+    };
+    for c in line.chars() {
+        if c.is_ascii_hexdigit() || c == ':' {
+            tok.push(c);
+        } else {
+            flush(&mut tok, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut tok, &mut out);
     out
 }
 
@@ -387,5 +409,8 @@ mod tests {
         assert!(!r.to_ascii_lowercase().contains("test-pc42") && !r.contains("Some User"), "{r}");
         assert!(r.contains("AllowComputerToTurnOffDevice : Enabled"));
         assert!(r.contains("é xx-xx-xx-xx-xx-xx"));
+        let r = redact("   IPv6 Address. . . : 2600:1700:36c0:c170::a(Preferred)\n   Link-local IPv6 Address : fe80::e90b:769c:d6a2:6fcc%19(Preferred)\n   at 12:34:56");
+        assert!(!r.contains("2600:1700") && r.contains("<ipv6 redacted>(Preferred)"), "{r}");
+        assert!(r.contains("fe80::e90b:769c:d6a2:6fcc%19") && r.contains("12:34:56"), "{r}");
     }
 }
