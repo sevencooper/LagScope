@@ -23,7 +23,7 @@ pub struct Checks {
     pub hardware_ok: Vec<String>,
 }
 
-fn in_play(r: &Analysis, t: i64) -> bool {
+pub(super) fn in_play(r: &Analysis, t: i64) -> bool {
     r.phases.is_empty() || r.phases.iter().any(|&(a, b)| t >= a && t <= b)
 }
 

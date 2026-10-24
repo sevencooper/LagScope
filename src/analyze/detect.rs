@@ -502,9 +502,21 @@ const GAME_FAULT_MB: f64 = 8.0;
 const DISK_SLOW_MS: f64 = 100.0;
 
 fn disk_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
+    // Several I/Os held up by the same disk stall finish together: one event, the slowest.
+    let mut slow: Vec<Anomaly> = Vec::new();
     for (t, ms, kb) in d.disk_slow.iter().filter(|x| x.1 >= DISK_SLOW_MS) {
-        out.push(Anomaly::new(*t, (*ms * 1000.0) as i64, Kind::DiskSlow, "disk", *ms, format!("one disk I/O ({kb:.0} KB) took {ms:.0} ms")));
+        match slow.last_mut() {
+            Some(last) if *t - last.t <= 2_000_000 => {
+                if *ms > last.value {
+                    last.value = *ms;
+                    last.dur = (*ms * 1000.0) as i64;
+                }
+                last.detail = format!("disk I/O held up for {:.0} ms", last.value);
+            }
+            _ => slow.push(Anomaly::new(*t, (*ms * 1000.0) as i64, Kind::DiskSlow, "disk", *ms, format!("one disk I/O ({kb:.0} KB) took {ms:.0} ms"))),
+        }
     }
+    out.extend(slow);
     for s in d.disk_1s.iter().filter(|s| s.game_fault_mb >= GAME_FAULT_MB) {
         out.push(Anomaly::new(
             s.t,
@@ -1148,6 +1160,11 @@ pub fn analyze(d: &Data) -> Analysis {
         driver_anomalies(d, &mut an);
     }
     disk_anomalies(d, &mut an);
+    // PC-side events count only during match play, like stalls and hitches of the game:
+    // starting the game and loading keep drivers and the disk busy in every game.
+    for a in an.iter_mut().filter(|a| matches!(a.kind, Kind::DriverLatency | Kind::Stall | Kind::DpcSpike | Kind::DiskSlow | Kind::GamePaging)) {
+        a.in_match = in_phases(&phases, a.t);
+    }
     an.sort_by_key(|a| (a.t, a.kind));
 
     // Correlations for noticeable game stalls.
