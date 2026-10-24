@@ -313,6 +313,49 @@ mod tests {
     }
 
     #[test]
+    fn startup_driver_load_is_not_judged() {
+        // 40 s of loading (the client sends a trickle) with many long driver runs and system
+        // stalls, then 120 s of quiet match play.
+        let dir = std::env::temp_dir().join(format!("lagscope_test_startup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pk = String::from("t_us,dir,proto,size,remote_ip,remote_port,local_port\n");
+        let mut t = 0;
+        while t < 160_000_000 {
+            writeln!(pk, "{t},R,U,300,203.0.113.5,7777,50000").unwrap();
+            if t >= 40_000_000 || t % 500_000 < 16_667 {
+                writeln!(pk, "{},S,U,120,203.0.113.5,7777,50000", t + 3000).unwrap();
+            }
+            t += 16_667;
+        }
+        std::fs::write(dir.join("game_packets.csv"), pk).unwrap();
+        let mut dl = String::from("t_us,kind,driver,dur_us,cpu\n");
+        let mut st = String::from("t_us,late_us\n");
+        for k in 0..200i64 {
+            writeln!(dl, "{},D,nvlddmkm.sys,4500,9", 1_000_000 + k * 150_000).unwrap();
+            writeln!(dl, "{},D,tcpip.sys,12000,8", 1_050_000 + k * 150_000).unwrap();
+        }
+        for k in 0..20i64 {
+            writeln!(st, "{},15000", 2_000_000 + k * 1_500_000).unwrap();
+        }
+        writeln!(dl, "{},D,tcpip.sys,700,8", 100_000_000).unwrap();
+        std::fs::write(dir.join("driver_long.csv"), dl).unwrap();
+        std::fs::write(dir.join("stalls.csv"), st).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"route":{"is_wifi":true},"config":{"processes":["Discovery.exe"]},"elevated":true,
+               "driver_latency":{"drivers":[{"driver":"tcpip.sys","dpc_max_us":12000,"isr_max_us":0},{"driver":"nvlddmkm.sys","dpc_max_us":4500,"isr_max_us":0}]}}"#,
+        )
+        .unwrap();
+        let a = analyze(&load::load(&dir).unwrap());
+        assert!(!a.phases.is_empty() && a.phases[0].0 >= 35_000_000, "{:?}", a.phases);
+        let st = |area: &str| a.health.iter().find(|h| h.area == area).map(|h| h.status.clone()).unwrap_or_default();
+        assert_eq!(st("Drivers"), "ok", "{:#?}", a.health);
+        assert!(!a.recommendations.iter().any(|r| r.contains("LatencyMon") || r.contains("tcpip")), "{:#?}", a.recommendations);
+        assert!(a.findings.iter().any(|f| f.contains("outside match play")), "{:#?}", a.findings);
+    }
+
+    #[test]
     fn upload_freezes_on_a_second_timer() {
         // Every 10 s at x.88 the router (and everything behind it) answers 220 ms late, while
         // the game's incoming stream keeps flowing: the PC's uploads are held back. One mark
