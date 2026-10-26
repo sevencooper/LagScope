@@ -206,6 +206,12 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     let per = |what: &str| r.periodicity.iter().find(|p| p.what.starts_with(what));
     let same_period = |a: f64, b: f64| (a / b - 1.0).abs() < 0.05;
+    // The same timer seen in two series: equal periods, or one a whole multiple of the other
+    // (a series can catch only every second or third beat).
+    let same_beat = |a: f64, b: f64| {
+        let r = a.max(b) / a.min(b);
+        r.round() <= 6.0 && (r / r.round() - 1.0).abs() < 0.03
+    };
     let gap_per = per("game inbound").or(per("gateway"));
     let scan_corr = r.gap_correlation.get("Wi-Fi scan/roam/drop (±3 s)").copied().unwrap_or(0.0)
         .max(r.gateway_spike_correlation.get("Wi-Fi scan/roam/drop (±3 s)").copied().unwrap_or(0.0));
@@ -217,9 +223,14 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
 
     // A first-hop stall on an exact timer that also freezes the game stream.
     let mut clockwork = None;
-    if let (Some(gwp), Some(gp)) = (per("gateway"), per("game inbound")) {
+    // The game's beat: 100 ms+ stalls, or shorter pauses when the freezes stay under 100 ms.
+    let game_beat = per("game inbound").or(per("game stream pauses"));
+    if let (Some(gwp), Some(gp)) = (per("gateway"), game_beat) {
         let gwc = r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0);
-        if gwp.score >= 0.8 && gwp.events >= 10 && same_period(gwp.period_s, gp.period_s) && gwc >= 0.6 {
+        let short = gp.what.starts_with("game stream pauses");
+        if gwp.score >= 0.8 && gwp.events >= 10 && same_beat(gwp.period_s, gp.period_s) && (short || gwc >= 0.6) {
+            // The timer's own period: the longer one (the other series caught a fraction).
+            let period = gwp.period_s.max(gp.period_s);
             let median = |mut v: Vec<f64>| {
                 v.sort_by(|a, b| a.total_cmp(b));
                 v.get(v.len() / 2).copied().unwrap_or(0.0)
@@ -228,29 +239,58 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
             let gw_lost = r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeLoss).count();
             let gw_slow = r.anomalies.iter().filter(|a| a.target == "gateway" && a.kind == Kind::ProbeSpike).count();
             let ping_txt = if gw_lost > gw_slow { "router pings get lost".to_string() } else { format!("router ping jumps to ~{gw_ms:.0} ms") };
-            let gap_ms = median(r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match).map(|a| a.value).collect());
+            let gap_ms = if short { gp.typical_ms } else { median(r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match).map(|a| a.value).collect()) };
             let link = if is_wifi { "Wi-Fi link" } else { "link to the router" };
             f.push(format!(
-                "Clockwork pattern: every {:.1} s the {link} goes dead for a moment - {ping_txt} and the game stream freezes for ~{:.0} ms, then the held-back packets arrive in one burst ({} of {} game stalls, both directions affected). Interference or a weak signal is never this regular: something on a fixed timer takes the link away{}.",
-                gwp.period_s,
+                "Clockwork pattern: every {:.1} s the {link} goes dead for a moment - {ping_txt} and the game stream freezes for ~{:.0} ms{}. Interference or a weak signal is never this regular: something on a fixed timer takes the link away{}.",
+                period,
                 gap_ms,
-                pct(gwc),
-                s.gaps_100ms,
+                if short { " (too short to count as a stall, but on the same beat)".to_string() } else { format!(", then the held-back packets arrive in one burst ({} of {} game stalls)", pct(gwc), s.gaps_100ms) },
                 if scan_corr < 0.2 { ", and it is not Windows' own Wi-Fi scanning (none happened at those moments)" } else { "" }
             ));
             f.push("Short freezes this regular make the game keep a bigger safety buffer for late packets, so shots, hit markers and movement can feel delayed all the time, not only at the freeze itself.".into());
             if is_wifi {
                 rec.push(format!(
                     "Hunt the {:.0}-second timer, one change at a time: (1) update the Wi-Fi driver from the PC/motherboard maker or chipset vendor; (2) connect to the router's other band (5 GHz instead of 6 GHz, or the reverse); (3) temporarily turn off Bluetooth, Nearby sharing and Phone Link; (4) restart the router and check its app for features that probe the network periodically (band steering, mesh, motion sensing, auto channel). Each change can be checked in 2 minutes without playing: run LagScope at the desktop, press Q, and see whether the router ping still spikes every {:.0} s.",
-                    gwp.period_s, gwp.period_s
+                    period, period
                 ));
             }
             clockwork = Some(format!(
                 "Every {:.1} s the {link} freezes for ~{:.0} ms and the game stream stalls with it: {}",
-                gwp.period_s,
+                period,
                 gap_ms,
                 category_text(if is_wifi { "wifi" } else { "lan" })
             ));
+        }
+    }
+    // A timer past the router: the game's data pauses on a beat while the router answers
+    // normally. Needs the internet pings to agree (on the same beat, or spiking with most
+    // stalls), so a game's own rhythm is not taken for a network fault.
+    let mut beyond = None;
+    if clockwork.is_none() {
+        let gw_beats = |p: f64| per("gateway").is_some_and(|g| same_beat(g.period_s, p));
+        let internet_with_stalls = r.gap_correlation.get("internet (1.1.1.1) spike/loss").copied().unwrap_or(0.0) >= 0.5;
+        if let Some(g) = game_beat.filter(|g| g.events >= 8 && !gw_beats(g.period_s)) {
+            let p = g.period_s;
+            let on_beat = |what: &str| per(what).is_some_and(|x| same_beat(x.period_s, p));
+            if on_beat("internet") || on_beat("server-path") || internet_with_stalls {
+                let ms = g.typical_ms;
+                let place = if on_beat("ISP hop") {
+                    "between your router and your provider's first router (the modem or the provider's gateway, or the line)"
+                } else {
+                    "past your router (the modem or the provider's gateway, or the provider's network)"
+                };
+                f.push(format!(
+                    "Timer past the router: about every {p:.1} s the game's data pauses for ~{ms:.0} ms together with internet pings, while your router answers normally. Your PC and its Wi-Fi are not the cause: something {place} holds traffic up on a fixed timer. Some beats are skipped, so pauses come {:.0}, {:.0} or {:.0} s apart.",
+                    p,
+                    2.0 * p,
+                    3.0 * p
+                ));
+                rec.push(format!(
+                    "The ~{p:.0} s pauses come from past your router, so changing Wi-Fi or router settings will not help. To narrow it down: (1) record a few minutes with a VPN on: if the pauses stay, they come from the modem / provider's gateway or the line, if they go away, from the provider's routing; (2) put the provider's gateway into bridge mode (or use your own modem) and record again; (3) report it to the provider with this recording."
+                ));
+                beyond = Some(format!("Every {p:.1} s the connection past your router pauses for ~{ms:.0} ms: the modem / provider's gateway or the provider"));
+            }
         }
     }
     // Other traffic during game stalls: only with a few stalls to go on, naming the programs
@@ -398,6 +438,8 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
         c
     } else if let Some(c) = clockwork {
         c
+    } else if let Some(c) = beyond {
+        c
     } else if let Some((cat, n)) = cats.iter().max_by_key(|x| *x.1) {
         format!(
             "{n} of {judged} marked spikes point to: {}{}",
@@ -433,13 +475,14 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     r.findings = f;
     r.recommendations = rec;
+    // The scorecard reads the headline (a timer on the first hop or past the router), so the
+    // headline is set first and only reworded afterwards.
+    r.headline = headline;
     r.health = super::health::scorecard(d, r, &checks);
     let look: Vec<&str> = r.health.iter().filter(|h| h.status == "warn").map(|h| h.area.as_str()).collect();
-    r.headline = if headline.starts_with("No significant problems") && !look.is_empty() {
-        format!("No lag problems found, but worth a look: {}", look.join(", "))
-    } else {
-        headline
-    };
+    if r.headline.starts_with("No significant problems") && !look.is_empty() {
+        r.headline = format!("No lag problems found, but worth a look: {}", look.join(", "));
+    }
     r.background_cpu = checks.background;
     r.hitch_procs = checks.hitch_procs;
 }

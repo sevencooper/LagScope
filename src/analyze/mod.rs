@@ -313,6 +313,36 @@ mod tests {
     }
 
     #[test]
+    fn timer_past_the_router() {
+        // A second router in front of ours freezes traffic every 10 s, but only some beats
+        // hit (10, 20, 30 s apart); the router ping stays clean, internet pings spike.
+        let mut s = Synth::new("beyond");
+        let beats = [20, 30, 50, 60, 90, 100, 110, 140, 150, 170, 200, 210, 230, 260, 270];
+        let hole = move |t: i64| beats.iter().any(|&b| t >= b * 1_000_000 + 400_000 && t < b * 1_000_000 + 550_000);
+        s.fill(300, hole, |_| 2_000, |_| false);
+        s.probes = s
+            .probes
+            .lines()
+            .map(|l| {
+                let c: Vec<&str> = l.split(',').collect();
+                match (c.first().and_then(|t| t.parse::<i64>().ok()), c.get(1)) {
+                    (Some(t), Some(&"internet")) if hole(t) => format!("{t},internet,{},0,150000,64", c[2]),
+                    _ => l.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        s.write();
+        let a = analyze(&load::load(&s.dir).unwrap());
+        assert!(a.headline.starts_with("Every 10.0 s the connection past your router"), "{}\n{:#?}", a.headline, a.periodicity);
+        let st = |area: &str| a.health.iter().find(|h| h.area == area).map(|h| h.status.clone()).unwrap_or_default();
+        assert_eq!(st("Wi-Fi"), "ok", "{:#?}", a.health);
+        assert_eq!(st("Internet & game server"), "warn", "{:#?}", a.health);
+        assert!(a.recommendations.iter().any(|r| r.contains("bridge mode")));
+    }
+
+    #[test]
     fn startup_driver_load_is_not_judged() {
         // 40 s of loading (the client sends a trickle) with many long driver runs and system
         // stalls, then 120 s of quiet match play.
