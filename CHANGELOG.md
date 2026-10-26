@@ -6,13 +6,14 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+## 0.6.0 (2026-10-25)
+
 - **Timers past the router:** when the game's data pauses on a fixed beat (e.g. every 10 s)
   while the router itself answers normally, the report now says so in the headline: the
   cause is the modem / provider's gateway or the provider, not the PC or Wi-Fi. Timers that
   skip beats (pauses 10, 20 or 30 s apart) and pauses shorter than 100 ms are found too.
 - **Fix:** a timer found on the Wi-Fi link did not turn the Wi-Fi line amber (the scorecard
   was worked out before the headline).
-
 - **Start-up and loading no longer count against your PC:** driver delays, whole-system
   stalls, driver load and slow disk moments are judged during match play only, like frame
   hitches already were (starting a game keeps drivers busy for minutes). What happened
@@ -24,6 +25,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
   failing" is only suggested when it happens often.
 - **Server ping:** unanswered probes to routers answering on the server's behalf are no longer
   presented as packet loss.
+- **New "How LagScope works" page** (docs/HOW_IT_WORKS.md): what is measured where, how a
+  lag spike gets its verdict, how timers are found and what the scorecard means.
 
 ## 0.5.1 (2026-10-23)
 
