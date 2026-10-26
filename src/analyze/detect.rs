@@ -178,6 +178,8 @@ pub struct Periodicity {
     pub period_s: f64,
     pub score: f64,
     pub events: usize,
+    /// Typical size of the events on the beat (ms), where the series has one.
+    pub typical_ms: f64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -502,9 +504,21 @@ const GAME_FAULT_MB: f64 = 8.0;
 const DISK_SLOW_MS: f64 = 100.0;
 
 fn disk_anomalies(d: &Data, out: &mut Vec<Anomaly>) {
+    // Several I/Os held up by the same disk stall finish together: one event, the slowest.
+    let mut slow: Vec<Anomaly> = Vec::new();
     for (t, ms, kb) in d.disk_slow.iter().filter(|x| x.1 >= DISK_SLOW_MS) {
-        out.push(Anomaly::new(*t, (*ms * 1000.0) as i64, Kind::DiskSlow, "disk", *ms, format!("one disk I/O ({kb:.0} KB) took {ms:.0} ms")));
+        match slow.last_mut() {
+            Some(last) if *t - last.t <= 2_000_000 => {
+                if *ms > last.value {
+                    last.value = *ms;
+                    last.dur = (*ms * 1000.0) as i64;
+                }
+                last.detail = format!("disk I/O held up for {:.0} ms", last.value);
+            }
+            _ => slow.push(Anomaly::new(*t, (*ms * 1000.0) as i64, Kind::DiskSlow, "disk", *ms, format!("one disk I/O ({kb:.0} KB) took {ms:.0} ms"))),
+        }
     }
+    out.extend(slow);
     for s in d.disk_1s.iter().filter(|s| s.game_fault_mb >= GAME_FAULT_MB) {
         out.push(Anomaly::new(
             s.t,
@@ -798,7 +812,9 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
     };
     let mut best: Vec<(f64, f64)> = Vec::new();
     let mut p = 3.0f64;
-    while p <= 180.0 {
+    // At least four full cycles in the recording, or a "period" is just two coincidences.
+    let longest = (end as f64 / 1e6 / 4.0).min(180.0);
+    while p <= longest {
         if let Some(s) = score(p) {
             best.push((p, s));
         }
@@ -845,6 +861,64 @@ pub fn periodicity(times: &[i64], end: i64) -> Option<(f64, f64, usize)> {
         p = est[est.len() / 2];
     }
     Some(((p * 100.0).round() / 100.0, top, times.len()))
+}
+
+/// A beat that may skip: a timer fires every p seconds but only some firings show up, so
+/// events come p, 2p, 3p ... apart. Judged on the gaps between consecutive events (events
+/// within 2 s merged: one freeze can cut a stream twice), against the chance that a random
+/// gap lands near a whole multiple. Returns (period, share of gaps on the beat, events).
+pub fn beat(times: &[i64]) -> Option<(f64, f64, usize)> {
+    let mut sorted_t = times.to_vec();
+    sorted_t.sort_unstable();
+    let mut ev: Vec<f64> = Vec::new();
+    for t in sorted_t {
+        let s = t as f64 / 1e6;
+        if ev.last().is_none_or(|&l| s - l > 2.0) {
+            ev.push(s);
+        }
+    }
+    if ev.len() < 8 {
+        return None;
+    }
+    let gaps: Vec<f64> = ev.windows(2).map(|w| w[1] - w[0]).collect();
+    let tol_of = |p: f64| (0.04 * p).max(0.4);
+    // Whole multiples 1..=6 of p count; longer gaps count as off the beat.
+    let on_beat = |p: f64, g: f64| {
+        let k = (g / p).round();
+        (1.0..=6.0).contains(&k) && (g - k * p).abs() <= tol_of(p)
+    };
+    let fit = |p: f64| {
+        let score = gaps.iter().filter(|&&g| on_beat(p, g)).count() as f64 / gaps.len() as f64;
+        (score, score - (2.0 * tol_of(p) / p).min(1.0))
+    };
+    let mut best: Option<(f64, f64, f64)> = None;
+    let mut p = 2.0f64;
+    while p <= 60.0 {
+        let (score, margin) = fit(p);
+        if best.is_none_or(|b| margin > b.2) {
+            best = Some((p, score, margin));
+        }
+        p += 0.02;
+    }
+    let (mut p, mut score, margin) = best?;
+    if score < 0.65 || margin < 0.45 {
+        return None;
+    }
+    // A 10 s beat also fits 5 s and 3.33 s (every gap is a multiple of those too): take the
+    // longest whole multiple that fits about as well.
+    let base = p;
+    for k in 2..=6 {
+        let q = base * k as f64;
+        let (s_q, _) = fit(q);
+        if q <= 60.0 && s_q >= score * 0.9 {
+            p = q;
+            score = s_q;
+        }
+    }
+    // Refine on the gaps themselves: total time over total periods.
+    let (sum, k): (f64, f64) = gaps.iter().filter(|&&g| on_beat(p, g)).fold((0.0, 0.0), |(s, k), &g| (s + g, k + (g / p).round()));
+    let period = if k > 0.0 { sum / k } else { p };
+    Some(((period * 100.0).round() / 100.0, score, ev.len()))
 }
 
 /// Events that start at the same point within a second (+-75 ms), e.g. always at x.88 s: a
@@ -1148,6 +1222,11 @@ pub fn analyze(d: &Data) -> Analysis {
         driver_anomalies(d, &mut an);
     }
     disk_anomalies(d, &mut an);
+    // PC-side events count only during match play, like stalls and hitches of the game:
+    // starting the game and loading keep drivers and the disk busy in every game.
+    for a in an.iter_mut().filter(|a| matches!(a.kind, Kind::DriverLatency | Kind::Stall | Kind::DpcSpike | Kind::DiskSlow | Kind::GamePaging)) {
+        a.in_match = in_phases(&phases, a.t);
+    }
     an.sort_by_key(|a| (a.t, a.kind));
 
     // Correlations for noticeable game stalls.
@@ -1188,6 +1267,35 @@ pub fn analyze(d: &Data) -> Analysis {
 
     // Periodicity.
     let end = d.duration_us;
+    // Shorter pauses of the game's stream too (from 50 ms, or twice the usual spacing): a
+    // timer that holds traffic for ~80 ms never makes a 100 ms stall but is still a beat.
+    let pauses: Vec<(i64, f64)> = {
+        let iv: Vec<f64> = inbound.windows(2).filter(|w| in_phases(&phases, w[0])).map(|w| (w[1] - w[0]) as f64).filter(|&g| g < 1e6).collect();
+        let med = percentile(&sorted(iv), 0.5);
+        let min = (2.0 * med).max(50_000.0) as i64;
+        inbound.windows(2).filter(|w| w[1] - w[0] >= min && w[1] - w[0] < PAUSE_US && in_phases(&phases, w[0])).map(|w| (w[0], (w[1] - w[0]) as f64 / 1000.0)).collect()
+    };
+    let spikes = |target: &str| -> Vec<(i64, f64)> {
+        let mut v: Vec<(i64, f64)> = an.iter().filter(|a| a.target == target && matches!(a.kind, Kind::ProbeSpike | Kind::ProbeLoss)).map(|a| (a.t, if a.kind == Kind::ProbeSpike { a.value } else { 0.0 })).collect();
+        v.sort_by_key(|x| x.0);
+        // One freeze = one event, even if it has both slow and lost pings.
+        v.dedup_by(|b, a| b.0 - a.0 < 1_000_000);
+        v
+    };
+    let typical = |v: &[(i64, f64)]| percentile(&sorted(v.iter().map(|x| x.1).filter(|&x| x > 0.0).collect()), 0.5);
+    let sized: Vec<(&str, Vec<(i64, f64)>)> = vec![
+        ("game stream pauses", pauses),
+        ("ISP hop ping spikes", spikes("hop2")),
+        ("server-path ping spikes", spikes("server")),
+    ];
+    for (what, v) in &sized {
+        let times: Vec<i64> = v.iter().map(|x| x.0).collect();
+        // Network timers often skip beats: the skip-tolerant search first (the strict one
+        // otherwise settles on a long multiple of the real beat).
+        if let Some((p, s, n)) = beat(&times).or_else(|| periodicity(&times, end)) {
+            res.periodicity.push(Periodicity { what: what.to_string(), period_s: p, score: s, events: n, typical_ms: typical(v) });
+        }
+    }
     let series: Vec<(&str, Vec<i64>)> = vec![
         ("game inbound gaps ≥100 ms", gaps.iter().map(|g| g.t).collect()),
         // A freeze shows up as delayed pings or, with some drivers/routers, as lost ones.
@@ -1202,13 +1310,22 @@ pub fn analyze(d: &Data) -> Analysis {
             v.dedup_by(|b, a| *b - *a < 1_000_000);
             v
         }),
-        ("internet ping spikes", an.iter().filter(|a| a.target == "internet" && a.kind == Kind::ProbeSpike).map(|a| a.t).collect()),
+        ("internet ping spikes", spikes("internet").iter().map(|x| x.0).collect()),
         ("Wi-Fi scans", an.iter().filter(|a| a.kind == Kind::WifiScan).map(|a| a.t).collect()),
         ("frame hitches", an.iter().filter(|a| a.kind == Kind::FrameHitch && a.in_match).map(|a| a.t).collect()),
     ];
     for (what, times) in series {
-        if let Some((p, s, n)) = periodicity(&times, end) {
-            res.periodicity.push(Periodicity { what: what.into(), period_s: p, score: s, events: n });
+        // Scans and hitches: only a strict beat; network series may skip beats.
+        let skips = !matches!(what, "Wi-Fi scans" | "frame hitches");
+        let found = if skips { beat(&times).or_else(|| periodicity(&times, end)) } else { periodicity(&times, end) };
+        if let Some((p, s, n)) = found {
+            let ms = match what {
+                "game inbound gaps ≥100 ms" => percentile(&sorted(gaps.iter().map(|g| g.value).collect()), 0.5),
+                "internet ping spikes" => typical(&spikes("internet")),
+                "gateway ping spikes/loss" => typical(&spikes("gateway")),
+                _ => 0.0,
+            };
+            res.periodicity.push(Periodicity { what: what.into(), period_s: p, score: s, events: n, typical_ms: ms });
         }
     }
 

@@ -23,7 +23,7 @@ pub struct Checks {
     pub hardware_ok: Vec<String>,
 }
 
-fn in_play(r: &Analysis, t: i64) -> bool {
+pub(super) fn in_play(r: &Analysis, t: i64) -> bool {
     r.phases.is_empty() || r.phases.iter().any(|&(a, b)| t >= a && t <= b)
 }
 
@@ -371,7 +371,9 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
     let mut add = |area: &str, warn: Option<bool>, text: String| {
         out.push(Health { area: area.into(), status: match warn { None => "na", Some(true) => "warn", Some(false) => "ok" }.into(), text });
     };
-    let clockwork = r.headline.starts_with("Every ");
+    // A timer on the first hop (Wi-Fi / link) or one past the router (internet line).
+    let beyond = r.headline.starts_with("Every ") && r.headline.contains("past your router");
+    let clockwork = r.headline.starts_with("Every ") && !beyond;
 
     // Link to the router.
     let area = if is_wifi { "Wi-Fi" } else { "Network link" };
@@ -419,6 +421,10 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
                 bad |= stalling;
                 parts.push(if s.gaps_100ms == 0 { "no game stalls".to_string() } else { format!("{stalls_pm:.1} game stalls/min") });
             }
+        }
+        if beyond {
+            bad = true;
+            parts.insert(0, "pauses on a timer past your router".to_string());
         }
         add("Internet & game server", Some(bad), parts.join(", "));
     } else {
