@@ -20,6 +20,8 @@ The coloured line at the top is the verdict. Under it, one dot per area
 (Wi-Fi, internet, frames, CPU, GPU, memory, disk, drivers, display & power,
 hardware setup):
 green is fine, amber is worth a look. "What to try" lists the next steps.
+How it all works (what is measured where): docs/HOW_IT_WORKS.md on the project page,
+https://github.com/sevencooper/LagScope
 
 
 Other tabs

@@ -9,7 +9,15 @@ Lag / hiccup diagnostics for online games on Windows. It started with THE FINALS
 
 Works on Wi-Fi and wired connections (on a cable, Wi-Fi events are ignored and the first hop is judged as a wired link). GPU temperatures, clock limits, power limit and PCIe link come from NVIDIA's NVML; on AMD and Intel graphics only GPU load is recorded (Windows' GPU engine counters). Frame times come from DXGI present events, so games that render with Vulkan or OpenGL without a DXGI swap chain show no frame data.
 
-End-user instructions are in [README.txt](README.txt), which ships inside the release zip.
+End-user instructions are in [README.txt](README.txt), which ships inside the release zip. **[How LagScope works](docs/HOW_IT_WORKS.md)** explains what is measured where, how a lag spike gets its verdict, and what the scorecard means.
+
+```mermaid
+flowchart LR
+    PC["Your PC<br>frames, CPU, GPU, drivers, disk"] -->|"Wi-Fi / cable<br>(router ping)"| RT["Router"]
+    RT --> ISP["Provider<br>(ISP ping)"] --> NET["Internet<br>(internet ping)"] --> SRV["Game server<br>(game packets)"]
+```
+
+A problem shows up at the first link where it appears: if the router ping is clean but the internet ping and the game stall together, the cause is past your router, not your PC or Wi-Fi.
 
 | Recording | Result |
 |---|---|
