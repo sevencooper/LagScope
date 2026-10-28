@@ -30,6 +30,7 @@ jobs:
         run: |
           mkdir -p dist/LagScope
           cp target/release/lagscope.exe README.txt PRIVACY.md LICENSE dist/LagScope/
+          cp src/fonts/OFL.txt dist/LagScope/FONTS-OFL.txt
           cd dist
           7z a -tzip LagScope.zip LagScope > /dev/null
           cp LagScope/lagscope.exe .

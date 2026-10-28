@@ -15,6 +15,7 @@ pub mod gui;
 pub mod gpu;
 pub mod hotkey;
 pub mod loadtest;
+pub mod look;
 pub mod net;
 pub mod netreport;
 pub mod probes;

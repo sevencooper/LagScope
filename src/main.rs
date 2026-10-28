@@ -12,6 +12,7 @@ mod app;
 mod clock;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod session;
+mod theme;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod ui;
 #[cfg(windows)]

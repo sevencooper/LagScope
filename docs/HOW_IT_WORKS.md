@@ -118,7 +118,7 @@ beat appears tells where the timer is:
 
 ## The scorecard
 
-| Line | Amber when |
+| Line | Worth a look (orange square) when |
 |---|---|
 | Wi-Fi / Network link | the router ping is unstable, freezes on a timer, uploads freeze, or the link drops |
 | Internet & game server | game stalls are frequent, the internet ping is bad, or pauses run on a timer past the router |

@@ -5,59 +5,65 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LagScope report</title>
 <style>/*UPLOT_CSS*/</style>
+<style>/*THEME_CSS*/</style>
 <style>
+/* Colours, radii and fonts: lagscope-core design/tokens.json (above). Dark only, like Pulse. */
 :root {
-  --bg: #f6f7f9; --card: #ffffff; --ink: #1d2330; --muted: #5d6677; --line: #e1e4ea;
-  --accent: #2f6fde; --bad: #d23c3c; --warn: #c98a12; --good: #2d9a5a;
-  --c1: #2f6fde; --c2: #d2552f; --c3: #2d9a5a; --c4: #8c4fd6; --c5: #c98a12; --c6: #0f9aa8;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #12151b; --card: #1b2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3340;
-    --accent: #6d9ef5; --c1: #6d9ef5; --c2: #f0845e; --c3: #5cc98a; --c4: #b48af0; --c5: #e3b34a; --c6: #45c4d1; color-scheme: dark; }
+  --bg: var(--ground); --card: var(--surface); --ink: var(--text);
+  --accent: var(--mint); --bad: var(--orange); --warn: var(--orange); --good: var(--mint);
+  --c1: var(--mint); --c2: var(--yellow); --c3: var(--orange-soft); --c4: var(--soft); --c5: var(--mint-hi); --c6: var(--muted);
+  --sans: var(--font-text), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --display: var(--font-display), var(--sans);
+  --mono: var(--font-mono), ui-monospace, Consolas, monospace;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
 main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
-h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 28px 0 10px; }
+h1 { font: 600 24px/1.25 var(--display); margin: 0 0 4px; }
+h2 { font: 600 17px/1.3 var(--display); margin: 32px 0 10px; }
 .sub { color: var(--muted); font-size: 13px; }
-.headline { font-size: 18px; font-weight: 600; padding: 16px 18px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--accent); margin: 18px 0; }
+.headline { font: 600 19px/1.35 var(--display); padding: 18px 20px; border-radius: var(--radius-card); background: var(--verdict-warn-bg); border: 1px solid var(--verdict-warn-line); margin: 18px 0; }
+.headline.ok { background: var(--verdict-ok-bg); border-color: var(--verdict-ok-line); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
 .score { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; margin: -6px 0 18px; }
 .score div { display: flex; gap: 8px; align-items: baseline; }
-.score .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; transform: translateY(1px); }
-.score .ok .dot { background: var(--good); } .score .warn .dot { background: var(--warn); } .score .na .dot { background: var(--line); }
+.score .dot { width: 10px; height: 10px; flex: none; transform: translateY(1px); background: var(--status-na); border-radius: var(--status-na-radius); }
+.score .ok .dot { background: var(--status-ok); border-radius: var(--status-ok-radius); }
+.score .warn .dot { background: var(--status-warn); border-radius: var(--status-warn-radius); }
 .score b { white-space: nowrap; } .score .na { color: var(--muted); }
 a { color: var(--accent); }
-.tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 12px 16px; }
 .tile .k { color: var(--muted); font-size: 12px; }
-.tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+.tile .v { font: 600 19px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 16px 20px; margin-bottom: 10px; }
 ul { margin: 6px 0; padding-left: 20px; }
 li { margin: 3px 0; }
 .marks { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 10px; }
 .mark { cursor: pointer; }
 .mark:hover { border-color: var(--accent); }
-.mark h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.pill { font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
-.pill.high { color: var(--bad); border-color: var(--bad); }
-.pill.medium { color: var(--warn); border-color: var(--warn); }
-.ev { font-size: 12px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
-.charts .chart { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 8px 2px; margin-bottom: 8px; overflow-x: auto; }
-.chart .title { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 4px 2px; }
+.mark h3 { margin: 0 0 6px; font: 600 15px/1.4 var(--display); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.pill { font: 500 11px/1.6 var(--sans); padding: 1px 10px; border-radius: var(--radius-chip); background: var(--gray-chip); color: var(--gray-chip-text); }
+.pill.high { color: var(--orange-soft); background: var(--orange-bg); }
+.pill.medium { color: var(--yellow); background: var(--orange-bg); }
+.ev { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.charts .chart { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 12px 10px 4px; margin-bottom: 8px; overflow-x: auto; }
+.chart .title { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 6px 4px; }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; position: sticky; top: env(safe-area-inset-top, 0px); background: var(--bg); padding: 6px 0; z-index: 5; }
-button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+button { font: inherit; padding: 6px 16px; border-radius: var(--radius-button); border: 1px solid var(--raised-line); background: var(--raised); color: var(--ink); cursor: pointer; }
 button:hover { border-color: var(--accent); }
-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
+#anoms td:first-child, #events td:first-child { font-family: var(--mono); white-space: nowrap; }
 .tablewrap { overflow-x: auto; max-height: 480px; overflow-y: auto; }
 .u-legend { font-size: 12px; }
 .u-legend .u-marker { border-radius: 2px; }
-.uplot, .u-wrap { color: var(--ink); }
+.u-legend .u-value { font-family: var(--mono); }
+.uplot, .u-wrap { color: var(--ink); font-family: var(--sans); }
 details summary { cursor: pointer; color: var(--muted); }
-code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+code, pre { font-family: var(--mono); }
+code { font-size: 12px; background: var(--raised); padding: 1px 5px; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -87,7 +93,7 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   <h2>Timeline</h2>
   <div class="toolbar">
     <button id="reset">Show whole session</button>
-    <span class="sub">Drag on a chart to zoom; double-click to reset. Red lines = your marks, orange = game stalls ≥100 ms, grey = outside match play.</span>
+    <span class="sub">Drag on a chart to zoom; double-click to reset. White lines = your marks, orange = game stalls ≥100 ms, grey = outside match play.</span>
   </div>
   <div class="charts" id="charts"></div>
 
@@ -111,9 +117,11 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtT = (s) => { const ds = Math.round(Math.max(0, s) * 10); const h = Math.floor(ds/36000), m = Math.floor(ds/600)%60, x = ((ds%600)/10).toFixed(1).padStart(4,"0"); return (h? h+":" : "") + String(m).padStart(2,"0") + ":" + x; };
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const rgba = (v, a) => { const h = css(v).replace("#", ""); return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${a})`; };
 
 $("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${D.meta.wifi_check_plan ? "none (Wi-Fi check)" : (D.meta.profile && !(D.meta.profile.processes || []).length ? ((D.meta.detected_games || []).join(", ") || "auto-detect (no game found)") : ((D.meta.profile && D.meta.profile.name) || (D.meta.config && D.meta.config.processes || []).join(", ")))}`;
 $("headline").textContent = D.headline;
+if (/^No (significant|problems)/.test(D.headline || "")) $("headline").classList.add("ok");
 for (const h of (D.health || [])) {
   const div = document.createElement("div");
   div.className = h.status;
@@ -179,14 +187,14 @@ const linesPlugin = () => ({
     ctx.save();
     // Grey = outside match play (menus / loading / spectating).
     if (D.phases.length) {
-      ctx.fillStyle = "rgba(128,128,128,0.12)";
+      ctx.fillStyle = rgba("--chart-device-pause", 0.35);
       const x0 = u.bbox.left, x1 = u.bbox.left + u.bbox.width;
       const px = t => Math.min(x1, Math.max(x0, u.valToPos(t, "x", true)));
       let prev = 0;
       for (const [a, b] of [...D.phases, [D.duration_s, D.duration_s]]) { const l = px(prev), r = px(a); if (r > l) ctx.fillRect(l, top, r - l, h); prev = b; }
     }
-    big.forEach(t => line(t, "rgba(230,140,30,0.45)", 1));
-    D.marks.forEach(t => line(t, "rgba(220,40,40,0.9)", 2));
+    big.forEach(t => line(t, rgba("--chart-freeze", 0.5), 1));
+    D.marks.forEach(t => line(t, rgba("--text", 0.85), 2));
     ctx.restore();
   }]}
 });
@@ -204,8 +212,8 @@ function chart(title, series, opts = {}) {
     cursor: { sync: { key: sync.key }, drag: { x: true, y: false } },
     scales: { x: { time: false }, y: opts.y || {} },
     axes: [
-      { stroke: css("--muted"), grid: { stroke: css("--line") }, values: (u, v) => v.map(fmtT) },
-      { stroke: css("--muted"), grid: { stroke: css("--line") }, size: 52, label: opts.unit || "" },
+      { stroke: css("--muted"), grid: { stroke: css("--rule") }, ticks: { stroke: css("--rule") }, font: `11px ${css("--font-mono")}, monospace`, values: (u, v) => v.map(fmtT) },
+      { stroke: css("--muted"), grid: { stroke: css("--rule") }, ticks: { stroke: css("--rule") }, font: `11px ${css("--font-mono")}, monospace`, labelFont: `600 11px ${css("--font-text")}, sans-serif`, size: 52, label: opts.unit || "" },
     ],
     series: [{ label: "time", value: (u, v) => v == null ? "-" : fmtT(v) }, ...series.map(s => ({
       label: s.label, stroke: s.color, width: 1.25, spanGaps: s.span ?? false,
@@ -228,7 +236,7 @@ const lossSum = S.t.map((_, i) => { let s = 0, any = false; for (const k in S.lo
 if (S.region) pser.push({ label: "game region ping (UDP)", data: S.region, color: C(6), unit: " ms", points: true });
 chart("Ping round-trip time (max per interval)", pser, { unit: "ms", height: 200 });
 chart("Ping losses (count)", [{ label: "lost probes", data: lossSum, color: css("--bad"), points: true }], { height: 110 });
-chart("Frame time (worst per interval)", [{ label: "frame", data: S.frame, color: C(3), unit: " ms" }], { unit: "ms" });
+chart("Frame time (worst per interval)", [{ label: "frame", data: S.frame, color: css("--chart-line"), unit: " ms" }], { unit: "ms" });
 if (!(D.meta.route && D.meta.route.is_wifi === false)) chart("Wi-Fi", [
   { label: "link quality", data: S.quality, color: C(1), span: true },
   { label: "RSSI dBm", data: S.rssi, color: C(2) },

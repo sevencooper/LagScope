@@ -6,6 +6,15 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+- **New look, shared with LagScope Pulse:** the window and the HTML report use the same
+  colours, fonts and shapes as the Pulse website (dark background, mint for steady and fine,
+  orange for freezes and anything worth a look). The result is shown as a verdict card. In the
+  scorecard, "fine" is a round dot and "worth a look" a square, so it does not rely on colour
+  alone. The report is now always dark, and your marks are white lines on its charts.
+  Nothing about what is measured or how it is judged changed.
+- Fonts: Space Grotesk, Inter and JetBrains Mono (SIL Open Font License, see
+  FONTS-OFL.txt), built into the program; nothing is loaded from the internet.
+
 ## 0.6.0 (2026-10-25)
 
 - **Timers past the router:** when the game's data pauses on a fixed beat (e.g. every 10 s)
