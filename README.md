@@ -23,7 +23,7 @@ A problem shows up at the first link where it appears: if the router ping is cle
 |---|---|
 | ![Live view while recording](docs/screenshots/app_recording.png) | ![Result with the scorecard](docs/screenshots/app_result.png) |
 
-![Top of an HTML report](docs/screenshots/report.png)
+![Top of an HTML report: verdict, scorecard and Good for](docs/screenshots/report.png)
 
 ## Sharing a recording and AI analysis
 
