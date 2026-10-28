@@ -249,6 +249,10 @@ pub fn render(d: &Data, a: &Analysis) -> String {
         "marks": d.marks.iter().map(|m| *m as f64 / 1e6).collect::<Vec<_>>(),
         "wifi_check": a.wifi_check,
         "driver_latency": d.meta["driver_latency"],
+        "good_for": a.good_for,
+        "good_for_notes": [a.good_for_from.as_deref().unwrap_or(""), super::goodfor::FOOTNOTE],
+        "pauses": a.pauses.iter().map(|p| json!({"t": p.t, "dir": p.dir, "ms": p.ms, "what": p.what, "cause": super::findings::category_text(p.cause)})).collect::<Vec<_>>(),
+        "status_words": crate::theme::STATUS.iter().map(|s| (s.0, s.3)).collect::<BTreeMap<_, _>>(),
     });
     // Escape "</" so embedded strings cannot terminate the script tag.
     let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");

@@ -32,6 +32,11 @@ h2 { font: 600 17px/1.3 var(--display); margin: 32px 0 10px; }
 .score .ok .dot { background: var(--status-ok); border-radius: var(--status-ok-radius); }
 .score .warn .dot { background: var(--status-warn); border-radius: var(--status-warn-radius); }
 .score b { white-space: nowrap; } .score .na { color: var(--muted); }
+.tile .v.great, .tile .v.good { color: var(--mint); } .tile .v.average { color: var(--yellow); } .tile .v.poor, .tile .v.bad { color: var(--orange); }
+.tile .v.none { color: var(--muted); font: 500 15px/1.9 var(--sans); }
+.tile .n { color: var(--muted); font-size: 12px; margin-top: 2px; }
+#pauses tbody tr { cursor: pointer; } #pauses tbody tr:hover td { background: var(--raised); }
+#pauses td:first-child, #pauses td:nth-child(3) { font-family: var(--mono); white-space: nowrap; }
 a { color: var(--accent); }
 .tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 12px 16px; }
 .tile .k { color: var(--muted); font-size: 12px; }
@@ -72,8 +77,11 @@ code { font-size: 12px; background: var(--raised); padding: 1px 5px; border-radi
   <div class="sub" id="sub"></div>
   <div class="headline" id="headline"></div>
   <div class="score" id="score"></div>
+  <div id="goodwrap" hidden><h2>Good for</h2>
+  <div class="grid" id="goodfor"></div>
+  <div class="sub" id="goodnotes" style="margin-top:6px"></div></div>
   <div id="recwrap"><h2>What to try</h2>
-  <div class="sub" style="margin:-6px 0 8px">Based on what this recording measured. Each is worth a try; none is guaranteed to help.</div>
+  <div class="sub" style="margin:-6px 0 8px">Based on this recording; not guaranteed to help.</div>
   <div class="card"><ul id="recs"></ul></div></div>
   <div class="grid" id="tiles"></div>
 
@@ -86,6 +94,12 @@ code { font-size: 12px; background: var(--raised); padding: 1px 5px; border-radi
   <h2>Marked lag spikes</h2>
   <div class="sub">Each card judges the 4 s before the key press (falling back to 10 s, with low confidence). Click a card to zoom every chart to it.</div>
   <div class="marks" id="marks" style="margin-top:8px"></div>
+
+  <div id="pausewrap" hidden>
+  <h2>Every pause</h2>
+  <div class="sub">Each time the game's data stopped for 100 ms or more during play, and what LagScope saw around it. Click a row to zoom every chart to it.</div>
+  <div class="card tablewrap" style="margin-top:8px"><table id="pauses"><thead><tr><th>time</th><th>direction</th><th>length</th><th>held or lost</th><th>likely cause</th></tr></thead><tbody></tbody></table></div>
+  </div>
 
   <h2>Findings</h2>
   <div class="card"><ul id="findings"></ul></div>
@@ -121,22 +135,35 @@ const rgba = (v, a) => { const h = css(v).replace("#", ""); return `rgba(${parse
 
 $("sub").textContent = `Recorded ${D.meta.start_local || "?"} · ${fmtT(D.duration_s)} · ${(D.meta.route && D.meta.route.description) || "unknown adapter"}${D.meta.route && D.meta.route.is_wifi ? " (Wi-Fi)" : ""} · game: ${D.meta.wifi_check_plan ? "none (Wi-Fi check)" : (D.meta.profile && !(D.meta.profile.processes || []).length ? ((D.meta.detected_games || []).join(", ") || "auto-detect (no game found)") : ((D.meta.profile && D.meta.profile.name) || (D.meta.config && D.meta.config.processes || []).join(", ")))}`;
 $("headline").textContent = D.headline;
-if (/^No (significant|problems)/.test(D.headline || "")) $("headline").classList.add("ok");
+if (/^(No (significant|problems)|Steady\.|Mostly steady\.)/.test(D.headline || "") && !/Worth a look/.test(D.headline)) $("headline").classList.add("ok");
 for (const h of (D.health || [])) {
   const div = document.createElement("div");
   div.className = h.status;
   const dot = document.createElement("span"); dot.className = "dot";
+  div.title = (D.status_words || {})[h.status] || "";
   const b = document.createElement("b"); b.textContent = h.area;
   const t = document.createElement("span"); t.textContent = h.text;
   div.append(dot, b, t);
   $("score").append(div);
 }
 if (!(D.recommendations || []).length) $("recwrap").hidden = true;
+if ((D.good_for || []).length) {
+  $("goodwrap").hidden = false;
+  $("goodfor").innerHTML = D.good_for.map(g => `<div class="tile"><div class="k">${esc(g.name)}</div><div class="v ${g.grade || "none"}">${esc(g.grade_text)}</div>${g.note ? `<div class="n">${esc(g.note)}</div>` : ""}</div>`).join("");
+  $("goodnotes").textContent = (D.good_for_notes || []).filter(Boolean).join(" ");
+}
+if ((D.pauses || []).length) {
+  $("pausewrap").hidden = false;
+  const dir = { down: "to you", up: "from you" }, what = { held: "held, then arrived together", lost: "never arrived (lost or not sent)", "not sent": "not sent by this PC" };
+  $("pauses").querySelector("tbody").innerHTML = D.pauses.map(p => `<tr data-t="${p.t}"><td>${fmtT(p.t)}</td><td>${dir[p.dir] || esc(p.dir)}</td><td>${p.ms.toFixed(0)} ms</td><td>${what[p.what] || esc(p.what)}</td><td>${esc(p.cause)}</td></tr>`).join("");
+}
 
 const tiles = [];
 const gw = D.probes.find(p => p.target === "gateway");
 if (D.stream.in_packets) tiles.push(["Game stalls ≥100 ms", D.stream.gaps_100ms], ["Inbound packet rate", D.stream.in_rate_pps.toFixed(0) + "/s"], ["Inbound jitter", D.stream.jitter_ms.toFixed(1) + " ms"]);
 if (gw) tiles.push(["Router ping p50 / p99", gw.p50_ms.toFixed(1) + " / " + gw.p99_ms.toFixed(0) + " ms"], ["Router ping loss", (gw.sent ? gw.lost*100/gw.sent : 0).toFixed(2) + "%"]);
+const inet = D.probes.find(p => p.target === "internet");
+if (inet && inet.sent > inet.lost) tiles.push(["Internet ping / jitter", inet.p50_ms.toFixed(0) + " / " + inet.jitter_ms.toFixed(1) + " ms"]);
 const srv = D.probes.find(p => p.target === "server");
 if (srv && srv.sent && srv.lost < srv.sent) tiles.push(["Server-path ping p50", srv.p50_ms.toFixed(0) + " ms"]);
 if (D.beacons && D.beacons.length) tiles.push(["Game region ping p50 / max", D.beacons[0].p50_ms.toFixed(0) + " / " + D.beacons[0].max_ms.toFixed(0) + " ms"]);
@@ -263,6 +290,7 @@ chart("Traffic", [
 function zoom(a, b) { charts.forEach(u => u.setScale("x", { min: a, max: b })); }
 $("reset").onclick = () => zoom(S.t[0], S.t[S.t.length - 1]);
 document.querySelectorAll(".mark").forEach(el => el.onclick = () => { const t = +el.dataset.t; zoom(t - 15, t + 5); $("charts").scrollIntoView({ behavior: "smooth" }); });
+document.querySelectorAll("#pauses tbody tr").forEach(el => el.onclick = () => { const t = +el.dataset.t; zoom(t - 10, t + 5); $("charts").scrollIntoView({ behavior: "smooth" }); });
 window.addEventListener("resize", () => charts.forEach(u => u.setSize({ width: W(), height: u.height })));
 
 const tb = (id, rows) => { $(id).querySelector("tbody").innerHTML = rows.join(""); };

@@ -372,8 +372,8 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
         out.push(Health { area: area.into(), status: match warn { None => "na", Some(true) => "warn", Some(false) => "ok" }.into(), text });
     };
     // A timer on the first hop (Wi-Fi / link) or one past the router (internet line).
-    let beyond = r.headline.starts_with("Every ") && r.headline.contains("past your router");
-    let clockwork = r.headline.starts_with("Every ") && !beyond;
+    let beyond = r.timer == Some("beyond");
+    let clockwork = r.timer == Some("first_hop");
 
     // Link to the router.
     let area = if is_wifi { "Wi-Fi" } else { "Network link" };
@@ -411,7 +411,7 @@ pub fn scorecard(d: &Data, r: &Analysis, c: &Checks) -> Vec<Health> {
         if let Some(n) = net {
             let loss = n.lost as f64 * 100.0 / n.sent as f64;
             bad |= n.p99_ms > 100.0 || loss - gw_loss > 1.0;
-            parts.push(format!("ping {:.0} ms{}", n.p50_ms, if loss - gw_loss > 0.2 { format!(", {:.1}% lost beyond the router", loss - gw_loss) } else { String::new() }));
+            parts.push(format!("ping {:.0} ms, jitter {:.1} ms{}", n.p50_ms, n.jitter_ms, if loss - gw_loss > 0.2 { format!(", {:.1}% lost beyond the router", loss - gw_loss) } else { String::new() }));
         }
         if s.in_packets > 0 {
             let stalling = s.gaps_100ms >= 3 && stalls_pm >= 0.3;

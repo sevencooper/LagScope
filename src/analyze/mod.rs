@@ -5,6 +5,7 @@ pub mod compare;
 pub mod detect;
 pub mod experiments;
 pub mod findings;
+pub mod goodfor;
 pub mod hardware;
 pub mod health;
 pub mod load;
@@ -20,6 +21,10 @@ pub fn run(dir: &Path) -> Result<String> {
         bail!("{} is not a session directory", dir.display());
     }
     let data = load::load(dir)?;
+    // A network test (Network tab) is not a recording: analysing it would overwrite its result.
+    if data.meta["kind"] == "network_test" {
+        bail!("{} is a network test, not a recording", dir.display());
+    }
     let analysis = detect::analyze(&data);
     std::fs::write(dir.join("report.html"), report::render(&data, &analysis))?;
     std::fs::write(dir.join("analysis.json"), serde_json::to_string_pretty(&analysis)?)?;
@@ -335,7 +340,7 @@ mod tests {
             + "\n";
         s.write();
         let a = analyze(&load::load(&s.dir).unwrap());
-        assert!(a.headline.starts_with("Every 10.0 s the connection past your router"), "{}\n{:#?}", a.headline, a.periodicity);
+        assert!(a.headline.starts_with("Your connection freezes for about") && a.headline.contains("every 10 seconds, past your router"), "{}\n{:#?}", a.headline, a.periodicity);
         let st = |area: &str| a.health.iter().find(|h| h.area == area).map(|h| h.status.clone()).unwrap_or_default();
         assert_eq!(st("Wi-Fi"), "ok", "{:#?}", a.health);
         assert_eq!(st("Internet & game server"), "warn", "{:#?}", a.health);

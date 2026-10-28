@@ -14,6 +14,25 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
   Nothing about what is measured or how it is judged changed.
 - Fonts: Space Grotesk, Inter and JetBrains Mono (SIL Open Font License, see
   FONTS-OFL.txt), built into the program; nothing is loaded from the internet.
+- **Good for gaming, video calls and streaming:** each recording and busy-connection test is
+  graded like LagScope Pulse and Cloudflare's speed test (ping, jitter, loss, ping under load,
+  speed); freezes keep gaming at Average at best. A recording takes ping under load and speed
+  from the busy-connection test (Network tab) on the same router, closest in time within two
+  weeks; without one those grades say "Not measured yet".
+- **Jitter** of the internet ping, defined like Cloudflare's, next to the ping in the
+  scorecard, the report and Compare.
+- **Every pause:** the report lists each time the game's data stopped for 100 ms or more
+  during play: when, which way, how long, held or never arrived, and the likely cause. Click a
+  row to zoom the charts to it.
+- **Busy-connection test, judged like Pulse:** "worth a look" when the ping rises more than
+  50 ms under load, instead of the A+ to F letters, with Pulse's explanation and router advice.
+  Old saved tests keep their letters. The test now remembers the router it ran behind.
+- **Same words as Pulse** for the same findings: a timer ("Your connection freezes for about
+  140 ms every 10 seconds: ..."), freezes, upload freezes, and steady sessions ("Steady. No
+  freezes in 9 min of play."). The scorecard marks say "fine", "worth a look" or "not
+  measured" when you point at them, and "What to try" ends with "not guaranteed to help".
+- **Fix:** "Rebuild report" on a network test (Reports tab) overwrote the test's result with
+  an empty recording analysis; network tests can no longer be re-analysed.
 
 ## 0.6.0 (2026-10-25)
 

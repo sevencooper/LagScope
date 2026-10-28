@@ -241,6 +241,10 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Some("load-test") => {
             let r = win::loadtest::run(&|s| println!("{s}"))?;
+            println!("Under load: {} (+{:.0} ms while downloading, +{:.0} ms while uploading)", if r.warn { "worth a look" } else { "fine" }, r.extra_down_ms, r.extra_up_ms);
+            for g in &r.good_for {
+                println!("Good for {}: {}", g.name, g.grade_text);
+            }
             for l in r.summary.iter().chain(&r.recommendations) {
                 println!("{l}");
             }

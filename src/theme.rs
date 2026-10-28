@@ -33,10 +33,11 @@ pub mod fonts {
     pub const MONO: [&[u8]; 2] = [include_bytes!("fonts/jetbrains-mono-latin.ttf"), include_bytes!("fonts/jetbrains-mono-latin-ext.ttf")];
 }
 
-/// Status colour and shape ("ok", "warn", anything else = not measured).
+/// Status colour, shape (round or square) and word ("fine", "worth a look", "not measured")
+/// for "ok", "warn" and anything else.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn status(key: &str) -> (Color, bool) {
-    STATUS.iter().find(|s| s.0 == key).or_else(|| STATUS.iter().find(|s| s.0 == "na")).map(|s| (s.1, s.2)).unwrap_or((DEVICE, false))
+pub fn status(key: &str) -> (Color, bool, &'static str) {
+    STATUS.iter().find(|s| s.0 == key).or_else(|| STATUS.iter().find(|s| s.0 == "na")).map(|s| (s.1, s.2, s.3)).unwrap_or((DEVICE, false, "not measured"))
 }
 
 #[cfg(test)]
@@ -46,8 +47,8 @@ mod tests {
     #[test]
     fn tokens_from_core() {
         assert_eq!(GROUND.hex(), "#0a0c0f");
-        assert_eq!(status("ok"), (MINT, true));
-        assert_eq!(status("warn"), (ORANGE, false));
+        assert_eq!(status("ok"), (MINT, true, "fine"));
+        assert_eq!(status("warn"), (ORANGE, false, "worth a look"));
         assert!(!status("na").1);
         assert!(REPORT_CSS.contains("--mint: #5BE7C4;"));
         assert!(REPORT_CSS.matches("@font-face").count() == 3);

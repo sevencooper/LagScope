@@ -134,6 +134,29 @@ beat appears tells where the timer is:
 Only match play counts for game- and PC-side lines: loading screens, menus, the first
 seconds of a match and moments you were alt-tabbed are shown but not judged.
 
+## Shared with LagScope Pulse
+
+Some results are worked out by [lagscope-core](https://github.com/sevencooper/lagscope-core),
+the engine the app shares with the LagScope Pulse website, so the same line gets the same
+grade and the same words in both:
+
+- **Jitter:** the average change between one internet ping and the next (Cloudflare's
+  definition), shown next to the ping.
+- **Good for** gaming, video calls and streaming: Cloudflare's network quality steps (ping,
+  jitter, loss, ping under load, download speed), plus one rule of LagScope's own: freezes
+  keep gaming at Average at best. A recording measures ping, jitter and loss itself; ping
+  under load and speed come from the busy-connection test (Network tab) on the same router,
+  the one closest in time within two weeks. Without one, those grades say "Not measured yet".
+- **Under load:** the busy-connection test is worth a look when the ping rises more than
+  50 ms while the line is full.
+- **Wording:** a timer, freezes and upload freezes are described in the same sentences as on
+  the website (core's `design/wording.md`), with LagScope's extra: where on the path it is.
+
+The report also lists **every pause**: each time the game's data stopped for 100 ms or more
+during play, which way (to you or from you), whether the packets were held and then arrived
+together, never arrived, or were not sent by this PC, and the likely cause, judged like a
+marked spike on the second around it.
+
 ## Glossary
 
 - **Ping / RTT:** time for a tiny packet to go somewhere and back.

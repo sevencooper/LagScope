@@ -926,8 +926,8 @@ dependencies = [
 
 [[package]]
 name = "lagscope-core"
-version = "0.1.0"
-source = "git+https://github.com/sevencooper/lagscope-core?tag=v0.1.0#6ff949f6d3506c1e59840eea7a718b1e2d0dcd84"
+version = "0.2.0"
+source = "git+https://github.com/sevencooper/lagscope-core?tag=v0.2.0#98320adb3f5647f67f8dec3866f14a4f37891065"
 dependencies = [
  "serde",
  "serde_json",
