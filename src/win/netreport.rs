@@ -25,14 +25,7 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
     let mut recs: Vec<String> = Vec::new();
     let mut headline = Vec::new();
     if let Some(l) = load {
-        headline.push(format!(
-            "{} under load (+{:.0} ms down, +{:.0} ms up), {:.0}/{:.0} Mbit/s",
-            if l.warn { "ping jumps" } else { "steady" },
-            l.extra_down_ms,
-            l.extra_up_ms,
-            l.down_mbps,
-            l.up_mbps
-        ));
+        headline.push(format!("{} under load ({}), {:.0}/{:.0} Mbit/s", if l.warn { "ping jumps" } else { "steady" }, l.rise_text(), l.down_mbps, l.up_mbps));
         findings.extend(l.summary.iter().cloned());
         recs.extend(l.recommendations.iter().cloned());
     }
@@ -56,7 +49,7 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
     });
     // The under-load line and Good for, as a recording's scorecard shows them.
     let health: Vec<serde_json::Value> = load
-        .map(|l| json!({ "area": "Under load", "status": if l.warn { "warn" } else { "ok" }, "text": format!("+{:.0} ms while downloading, +{:.0} ms while uploading", l.extra_down_ms, l.extra_up_ms) }))
+        .map(|l| json!({ "area": "Under load", "status": if l.warn { "warn" } else { "ok" }, "text": l.rise_text() }))
         .into_iter()
         .collect();
     let good_for = load.map(|l| l.good_for.clone()).unwrap_or_default();
@@ -86,11 +79,10 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
     h.push_str(&format!("<h1>{}</h1><p class=w>{}</p>", esc(&headline), esc(meta["start_local"].as_str().unwrap_or(""))));
     if let Some(l) = load {
         h.push_str(&format!(
-            "<p><span class=\"dot{}\" title=\"{}\"></span><b>Under load</b> +{:.0} ms while downloading, +{:.0} ms while uploading</p><h2>Good for</h2><div class=grid>",
+            "<p><span class=\"dot{}\" title=\"{}\"></span><b>Under load</b> {}</p><h2>Good for</h2><div class=grid>",
             if l.warn { " warn" } else { "" },
             crate::theme::status(if l.warn { "warn" } else { "ok" }).2,
-            l.extra_down_ms,
-            l.extra_up_ms
+            esc(&l.rise_text())
         ));
         for g in &l.good_for {
             h.push_str(&format!("<div class=card><div class=k>{}</div><div class=\"v {}\">{}</div></div>", g.name, g.grade.unwrap_or("none"), g.grade_text));

@@ -65,11 +65,16 @@ fn show(q: &[Quality], what: &str) -> Vec<GoodFor> {
 }
 
 /// What a busy-connection test adds: (idle round trip, jitter, loss %, increase under load,
-/// download bits/s), from its saved form (`LoadResult` as JSON).
-pub fn load_test_inputs(l: &Value) -> Option<(f64, f64, f64, f64, f64)> {
+/// download bits/s), from its saved form (`LoadResult` as JSON). The increase is None when no
+/// internet ping was answered under load (a median of 0 there means "no answers").
+pub fn load_test_inputs(l: &Value) -> Option<(f64, f64, f64, Option<f64>, f64)> {
     let f = |a: &str, b: &str| l[a][b].as_f64();
     let idle = f("idle", "internet_p50")?;
-    let increase = (f("download", "internet_p50")? - idle).max(f("upload", "internet_p50")? - idle).max(0.0);
+    let rise = |phase: &str| f(phase, "internet_p50").filter(|&p| p > 0.0).map(|p| (p - idle).max(0.0));
+    let increase = match (rise("download"), rise("upload")) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     let samples = f("idle", "samples").unwrap_or(0.0);
     let loss = if samples > 0.0 { f("idle", "lost").unwrap_or(0.0) * 100.0 / samples } else { 0.0 };
     Some((idle, f("idle", "internet_jitter").unwrap_or(0.0), loss, increase, l["down_mbps"].as_f64()? * 1e6))
@@ -79,7 +84,7 @@ pub fn load_test_inputs(l: &Value) -> Option<(f64, f64, f64, f64, f64)> {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn for_load_test(l: &Value) -> Vec<GoodFor> {
     let Some((latency_ms, jitter_ms, loss_pct, increase, down)) = load_test_inputs(l) else { return Vec::new() };
-    let i = Inputs { latency_ms, jitter_ms, loss_pct, load_increase_ms: Some(increase), download_bps: Some(down), froze: false };
+    let i = Inputs { latency_ms, jitter_ms, loss_pct, load_increase_ms: increase, download_bps: Some(down), froze: false };
     show(&grade_inputs(&i), "test")
 }
 
@@ -122,9 +127,13 @@ pub fn grade(d: &Data, r: &mut Analysis, froze: bool) {
     let mut i = Inputs { latency_ms: net.p50_ms, jitter_ms: net.jitter_ms, loss_pct: net.lost as f64 * 100.0 / net.sent as f64, froze, ..Default::default() };
     if let Some((l, when)) = nearest_load_test(d) {
         if let Some((_, _, _, increase, down)) = load_test_inputs(&l) {
-            i.load_increase_ms = Some(increase);
+            i.load_increase_ms = increase;
             i.download_bps = Some(down);
-            r.good_for_from = Some(format!("Ping under load and speed from the busy-connection test of {when}."));
+            r.good_for_from = Some(if increase.is_some() {
+                format!("Ping under load and speed from the busy-connection test of {when}.")
+            } else {
+                format!("Speed from the busy-connection test of {when} (its ping under load could not be measured).")
+            });
         }
     }
     r.good_for = show(&grade_inputs(&i), "recording");
@@ -140,10 +149,13 @@ mod tests {
         let ph = |p50: f64| json!({ "internet_p50": p50, "internet_jitter": 2.0, "lost": 0, "samples": 100 });
         let l = json!({ "idle": ph(12.0), "download": ph(20.0), "upload": ph(90.0), "down_mbps": 300.0 });
         let (idle, _, loss, inc, down) = load_test_inputs(&l).unwrap();
-        assert_eq!((idle, loss, inc, down), (12.0, 0.0, 78.0, 3e8));
+        assert_eq!((idle, loss, inc, down), (12.0, 0.0, Some(78.0), 3e8));
         let g = for_load_test(&l);
         // 10 (latency) + 10 (loss) + 0 (increase 78 ms) = 20: Average for gaming.
         assert_eq!((g[0].name, g[0].grade_text), ("Gaming", "Average"));
         assert!(g.iter().all(|g| g.note.is_none()));
+        // No answers while downloading (median 0): only the upload phase counts.
+        let l = json!({ "idle": ph(12.0), "download": ph(0.0), "upload": ph(30.0), "down_mbps": 300.0 });
+        assert_eq!(load_test_inputs(&l).unwrap().3, Some(18.0));
     }
 }

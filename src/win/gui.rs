@@ -888,7 +888,7 @@ impl GuiApp {
                     ui.horizontal(|ui| {
                         look::status_mark(ui, status);
                         ui.label(RichText::new("Under load").strong());
-                        ui.label(format!("+{:.0} ms while downloading, +{:.0} ms while uploading", l.extra_down_ms, l.extra_up_ms));
+                        ui.label(l.rise_text());
                     })
                     .response
                     .on_hover_text(t::status(status).2);

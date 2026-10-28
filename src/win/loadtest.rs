@@ -54,9 +54,10 @@ pub struct LoadResult {
     pub upload: Phase,
     pub down_mbps: f64,
     pub up_mbps: f64,
-    /// How much the internet ping rose while downloading / uploading (ms).
-    pub extra_down_ms: f64,
-    pub extra_up_ms: f64,
+    /// How much the internet ping rose while downloading / uploading (ms); None = no internet
+    /// ping was answered in that phase (not measured, never "no rise").
+    pub extra_down_ms: Option<f64>,
+    pub extra_up_ms: Option<f64>,
     /// Worth a look: the ping rose more than `WARN_MS`.
     pub warn: bool,
     pub good_for: Vec<crate::analyze::goodfor::GoodFor>,
@@ -260,14 +261,26 @@ pub fn run(progress: &dyn Fn(String)) -> Result<LoadResult> {
     Ok(res)
 }
 
+impl LoadResult {
+    /// "+3 ms while downloading, +26 ms while uploading".
+    pub fn rise_text(&self) -> String {
+        let one = |x: Option<f64>, what: &str| match x {
+            Some(ms) => format!("+{ms:.0} ms while {what}"),
+            None => format!("no internet ping answered while {what}"),
+        };
+        format!("{}, {}", one(self.extra_down_ms, "downloading"), one(self.extra_up_ms, "uploading"))
+    }
+}
+
 /// Pure part (unit-tested): judgement, grades and plain-language result. The sentences
 /// follow lagscope-core's design/wording.md (`load`).
 pub fn interpret(res: &mut LoadResult) {
-    let inc = |p: &Phase| (p.internet_p50 - res.idle.internet_p50).max(0.0);
+    // A phase without a single answered internet ping says nothing about the rise.
+    let inc = |p: &Phase| (p.internet_p50 > 0.0).then(|| (p.internet_p50 - res.idle.internet_p50).max(0.0));
     let rinc = |p: &Phase| (p.router_p50 - res.idle.router_p50).max(0.0);
-    let (dn, up) = (inc(&res.download), inc(&res.upload));
-    res.extra_down_ms = dn;
-    res.extra_up_ms = up;
+    res.extra_down_ms = inc(&res.download);
+    res.extra_up_ms = inc(&res.upload);
+    let (dn, up) = (res.extra_down_ms.unwrap_or(0.0), res.extra_up_ms.unwrap_or(0.0));
     let worst = dn.max(up);
     res.warn = worst > WARN_MS;
     res.good_for = crate::analyze::goodfor::for_load_test(&serde_json::to_value(&*res).unwrap_or_default());
@@ -277,13 +290,21 @@ pub fn interpret(res: &mut LoadResult) {
             "Your ping jumps by about {worst:.0} ms while someone {}. When the line is full, packets wait in a queue, usually in the router or modem. Games feel that as lag whenever someone at home streams, downloads or backs up files. It is called bufferbloat, and it can often be fixed in the router.",
             if up > dn { "uploads" } else { "downloads" }
         ));
+    } else if res.extra_down_ms.is_none() && res.extra_up_ms.is_none() {
+        res.summary.push("Ping under load could not be measured: no internet ping was answered while the line was full. Run the test again.".into());
     } else {
         res.summary.push("No ping jumps under load: other people's downloads and uploads should not cause lag.".into());
     }
     res.summary.push(format!("Speed: {:.0} Mbit/s down, {:.0} Mbit/s up.", res.down_mbps, res.up_mbps));
     res.summary.push(format!(
-        "Internet ping: {:.0} ms idle (jitter {:.1} ms), {:.0} ms while downloading, {:.0} ms while uploading. Router ping: {:.0} / {:.0} / {:.0} ms.",
-        res.idle.internet_p50, res.idle.internet_jitter, res.download.internet_p50, res.upload.internet_p50, res.idle.router_p50, res.download.router_p50, res.upload.router_p50
+        "Internet ping: {:.0} ms idle (jitter {:.1} ms), {} while downloading, {} while uploading. Router ping: {:.0} / {:.0} / {:.0} ms.",
+        res.idle.internet_p50,
+        res.idle.internet_jitter,
+        answered(res.download.internet_p50),
+        answered(res.upload.internet_p50),
+        res.idle.router_p50,
+        res.download.router_p50,
+        res.upload.router_p50
     ));
     if !res.warn {
         return;
@@ -301,6 +322,11 @@ pub fn interpret(res: &mut LoadResult) {
             res.recommendations.push("Uploads hurt most: pause cloud backups / photo sync / streaming uploads while playing.".into());
         }
     }
+}
+
+/// A phase's median ping, or "no answer" when none came back.
+fn answered(p50: f64) -> String {
+    if p50 > 0.0 { format!("{p50:.0} ms") } else { "no answer".into() }
 }
 
 #[cfg(test)]
@@ -325,5 +351,11 @@ mod tests {
         let mut f = LoadResult { idle: ph(3.0, 12.0), download: ph(4.0, 40.0), upload: ph(4.0, 30.0), ..Default::default() };
         interpret(&mut f);
         assert!(!f.warn && f.recommendations.is_empty(), "{:?}", f.summary);
+        // No internet ping answered while downloading: not measured, not "+0 ms".
+        let mut n = LoadResult { idle: ph(3.0, 18.0), download: ph(70.0, 0.0), upload: ph(4.0, 44.0), down_mbps: 500.0, ..Default::default() };
+        interpret(&mut n);
+        assert_eq!((n.extra_down_ms, n.extra_up_ms), (None, Some(26.0)));
+        assert!(n.rise_text().starts_with("no internet ping answered while downloading"), "{}", n.rise_text());
+        assert!(n.summary.iter().any(|s| s.contains("no answer while downloading")), "{:?}", n.summary);
     }
 }

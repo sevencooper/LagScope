@@ -27,6 +27,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 - **Busy-connection test, judged like Pulse:** "worth a look" when the ping rises more than
   50 ms under load, instead of the A+ to F letters, with Pulse's explanation and router advice.
   Old saved tests keep their letters. The test now remembers the router it ran behind.
+- **Fix:** when no internet ping was answered while the line was full, the busy-connection
+  test read that as "no rise" (and graded it A+); it now says it could not be measured.
 - **Same words as Pulse** for the same findings: a timer ("Your connection freezes for about
   140 ms every 10 seconds: ..."), freezes, upload freezes, and steady sessions ("Steady. No
   freezes in 9 min of play."). The scorecard marks say "fine", "worth a look" or "not
