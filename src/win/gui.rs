@@ -132,7 +132,7 @@ struct GuiApp {
     close_when_done: bool,
     selftest: Option<SelfTest>,
     /// Findings and suggestions of the last finished session (read once from analysis.json).
-    summary: Option<(PathBuf, Vec<String>, Vec<String>, Vec<HealthRow>)>,
+    summary: Option<(PathBuf, Vec<String>, Vec<String>, Vec<HealthRow>, serde_json::Value)>,
     /// Re-analysis running in the background (sessions list reloads when it finishes).
     reanalyzing: Arc<std::sync::atomic::AtomicUsize>,
     /// Recording whose summary / AI prompt was just copied (shows "Copied" for a moment).
@@ -611,18 +611,19 @@ impl GuiApp {
                 if self.summary.as_ref().is_none_or(|x| x.0 != f.dir) {
                     let a: serde_json::Value = std::fs::read_to_string(f.dir.join("analysis.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
                     let list = |k: &str| a[k].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-                    self.summary = Some((f.dir.clone(), list("findings"), list("recommendations"), read_health(&a)));
+                    self.summary = Some((f.dir.clone(), list("findings"), list("recommendations"), read_health(&a), a));
                 }
-                if let Some((_, findings, recs, health)) = &self.summary {
+                if let Some((_, findings, recs, health, a)) = &self.summary {
                     if !health.is_empty() {
                         ui.add_space(6.0);
                         scorecard(ui, health);
                     }
+                    good_for(ui, a);
                     if !recs.is_empty() {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("What to try").strong());
-                            hint(ui, "based on what this recording measured; worth a try, none is guaranteed to help");
+                            hint(ui, "Based on this recording; not guaranteed to help.");
                         });
                         for r in recs.iter().take(3) {
                             ui.add(egui::Label::new(format!("• {}", r.replace('`', ""))).wrap());
@@ -883,21 +884,18 @@ impl GuiApp {
             }
             match &j.result {
                 Some(Ok(l)) => {
-                    let gc = |g: &str| match g {
-                        "A+" | "A" => c(t::MINT),
-                        "B" => c(t::YELLOW),
-                        _ => c(t::ORANGE),
-                    };
+                    let status = if l.warn { "warn" } else { "ok" };
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Download").strong());
-                        ui.label(RichText::new(&l.grade_down).font(look::display(22.0)).color(gc(&l.grade_down)));
-                        ui.add_space(14.0);
-                        ui.label(RichText::new("Upload").strong());
-                        ui.label(RichText::new(&l.grade_up).font(look::display(22.0)).color(gc(&l.grade_up)));
-                    });
+                        look::status_mark(ui, status);
+                        ui.label(RichText::new("Under load").strong());
+                        ui.label(l.rise_text());
+                    })
+                    .response
+                    .on_hover_text(t::status(status).2);
                     for x in l.summary.iter() {
                         ui.add(egui::Label::new(x).wrap());
                     }
+                    good_for(ui, &serde_json::json!({ "good_for": l.good_for }));
                     for x in l.recommendations.iter() {
                         ui.add(egui::Label::new(format!("• {x}")).wrap());
                     }
@@ -1104,7 +1102,7 @@ impl GuiApp {
                                 }
                             }
                             if ui
-                                .add_enabled(r.dir.join("meta.json").exists(), egui::Button::new("Rebuild report"))
+                                .add_enabled(r.dir.join("meta.json").exists() && r.game != "Network test", egui::Button::new("Rebuild report"))
                                 .on_hover_text("Re-run the analysis with this version of LagScope")
                                 .clicked()
                             {
@@ -1514,12 +1512,49 @@ fn scorecard(ui: &mut egui::Ui, rows: &[HealthRow]) {
             ui.horizontal(|ui| {
                 look::status_mark(ui, status);
                 ui.label(RichText::new(area).strong());
-            });
+            })
+            .response
+            .on_hover_text(t::status(status).2);
             let t = RichText::new(text);
             ui.add(egui::Label::new(if status == "na" { t.weak() } else { t }).wrap());
             ui.end_row();
         }
     });
+}
+
+/// "Good for" gaming, video calls and streaming (lagscope-core's grades), from an analysis
+/// (`good_for`, plus `good_for_from` / `good_for_notes` when present).
+fn good_for(ui: &mut egui::Ui, a: &serde_json::Value) {
+    use crate::analyze::goodfor::FOOTNOTE;
+    let Some(rows) = a["good_for"].as_array().filter(|r| !r.is_empty()) else { return };
+    ui.add_space(8.0);
+    ui.label(RichText::new("Good for").strong());
+    ui.horizontal_wrapped(|ui| {
+        for g in rows {
+            look::card().inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                ui.set_width(170.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(g["name"].as_str().unwrap_or("")).weak());
+                    let color = match g["grade"].as_str() {
+                        Some("great" | "good") => c(t::MINT),
+                        Some("average") => c(t::YELLOW),
+                        Some(_) => c(t::ORANGE),
+                        None => c(t::MUTED),
+                    };
+                    let text = RichText::new(g["grade_text"].as_str().unwrap_or("")).color(color);
+                    ui.label(if g["grade"].is_null() { text } else { text.font(look::display(18.0)) });
+                    if let Some(n) = g["note"].as_str() {
+                        ui.add(egui::Label::new(RichText::new(n).small().weak()).wrap());
+                    }
+                });
+            });
+        }
+    });
+    let mut notes: Vec<&str> = a["good_for_from"].as_str().into_iter().chain(a["good_for_notes"].as_array().into_iter().flatten().filter_map(|n| n.as_str())).filter(|n| !n.is_empty()).collect();
+    if !notes.contains(&FOOTNOTE) {
+        notes.push(FOOTNOTE);
+    }
+    hint(ui, &notes.join(" "));
 }
 
 /// Secondary explanation: dim, wrapped.
@@ -1585,7 +1620,7 @@ fn headline_color(ui: &egui::Ui, h: &str) -> Color32 {
 }
 
 fn headline_ok(h: &str) -> bool {
-    h.starts_with("No significant") || h.starts_with("No problems")
+    (h.starts_with("No significant") || h.starts_with("No problems") || h.starts_with("Steady.") || h.starts_with("Mostly steady.")) && !h.contains("Worth a look")
 }
 
 /// Small line chart of the last two minutes; NaN = no data.

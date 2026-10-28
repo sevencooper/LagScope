@@ -25,7 +25,7 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
     let mut recs: Vec<String> = Vec::new();
     let mut headline = Vec::new();
     if let Some(l) = load {
-        headline.push(format!("busy-connection grade {} down / {} up, {:.0}/{:.0} Mbit/s", l.grade_down, l.grade_up, l.down_mbps, l.up_mbps));
+        headline.push(format!("{} under load ({}), {:.0}/{:.0} Mbit/s", if l.warn { "ping jumps" } else { "steady" }, l.rise_text(), l.down_mbps, l.up_mbps));
         findings.extend(l.summary.iter().cloned());
         recs.extend(l.recommendations.iter().cloned());
     }
@@ -47,20 +47,55 @@ pub fn save(base: &Path, router: Option<&RouterInfo>, load: Option<&LoadResult>,
         "load_test": load,
         "wifi_scan": scan,
     });
-    let analysis = json!({ "headline": headline, "findings": findings, "recommendations": recs });
+    // The under-load line and Good for, as a recording's scorecard shows them.
+    let health: Vec<serde_json::Value> = load
+        .map(|l| json!({ "area": "Under load", "status": if l.warn { "warn" } else { "ok" }, "text": l.rise_text() }))
+        .into_iter()
+        .collect();
+    let good_for = load.map(|l| l.good_for.clone()).unwrap_or_default();
+    let analysis = json!({
+        "headline": headline,
+        "findings": findings,
+        "recommendations": recs,
+        "health": health,
+        "good_for": good_for,
+        "good_for_notes": ["", crate::analyze::goodfor::FOOTNOTE],
+    });
     std::fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
     std::fs::write(dir.join("analysis.json"), serde_json::to_string_pretty(&analysis)?)?;
 
-    // A plain, self-contained page.
-    let mut h = String::from("<!doctype html><meta charset=utf-8><title>LagScope network test</title><style>body{font:15px system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;background:#16181c;color:#dde}h1{font-size:22px}td,th{padding:3px 10px;text-align:left;border-bottom:1px solid #333}table{border-collapse:collapse;margin:8px 0}.w{color:#9ab}</style>");
+    // A plain, self-contained page in the shared look (crate::theme).
+    let mut h = format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>LagScope network test</title><style>{}</style><style>{}</style>",
+        crate::theme::REPORT_CSS,
+        ":root{color-scheme:dark}body{font:14px/1.5 var(--font-text),system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;background:var(--ground);color:var(--text)}\
+         h1,h2,h3{font-family:var(--font-display),sans-serif;font-weight:600}h1{font-size:22px}h2{font-size:17px;margin-top:28px}\
+         td,th{padding:5px 10px;text-align:left;border-bottom:1px solid var(--rule);font-variant-numeric:tabular-nums}th{color:var(--muted)}table{border-collapse:collapse;margin:8px 0}\
+         .w{color:var(--muted)}.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-card);padding:12px 18px}\
+         .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.k{color:var(--muted);font-size:12px}\
+         .v{font:600 19px/1.4 var(--font-mono),monospace}.great,.good{color:var(--mint)}.average{color:var(--yellow)}.poor,.bad{color:var(--orange)}.none{color:var(--muted)}\
+         .dot{display:inline-block;width:10px;height:10px;margin-right:8px;border-radius:var(--status-ok-radius);background:var(--status-ok)}.dot.warn{border-radius:var(--status-warn-radius);background:var(--status-warn)}"
+    );
     h.push_str(&format!("<h1>{}</h1><p class=w>{}</p>", esc(&headline), esc(meta["start_local"].as_str().unwrap_or(""))));
+    if let Some(l) = load {
+        h.push_str(&format!(
+            "<p><span class=\"dot{}\" title=\"{}\"></span><b>Under load</b> {}</p><h2>Good for</h2><div class=grid>",
+            if l.warn { " warn" } else { "" },
+            crate::theme::status(if l.warn { "warn" } else { "ok" }).2,
+            esc(&l.rise_text())
+        ));
+        for g in &l.good_for {
+            h.push_str(&format!("<div class=card><div class=k>{}</div><div class=\"v {}\">{}</div></div>", g.name, g.grade.unwrap_or("none"), g.grade_text));
+        }
+        h.push_str(&format!("</div><p class=w>{}</p>", crate::analyze::goodfor::FOOTNOTE));
+    }
     h.push_str("<h2>Findings</h2><ul>");
     for f in &findings {
         h.push_str(&format!("<li>{}</li>", esc(f)));
     }
     h.push_str("</ul>");
     if !recs.is_empty() {
-        h.push_str("<h2>Suggestions</h2><ul>");
+        h.push_str("<h2>What to try</h2><p class=w>Based on this test; not guaranteed to help.</p><ul>");
         for r in &recs {
             h.push_str(&format!("<li>{}</li>", esc(r)));
         }

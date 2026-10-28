@@ -60,9 +60,13 @@ pub fn summary_text(dir: &Path) -> Option<String> {
         };
         t.push_str(&format!("{mark} {}: {}\n", h["area"].as_str().unwrap_or(""), h["text"].as_str().unwrap_or("")));
     }
+    let good: Vec<String> = an["good_for"].as_array().into_iter().flatten().map(|g| format!("{} {}", g["name"].as_str().unwrap_or(""), g["grade_text"].as_str().unwrap_or(""))).collect();
+    if !good.is_empty() {
+        t.push_str(&format!("Good for: {}\n", good.join(", ")));
+    }
     let recs: Vec<&str> = an["recommendations"].as_array().into_iter().flatten().filter_map(|r| r.as_str()).take(3).collect();
     if !recs.is_empty() {
-        t.push_str("What to try:\n");
+        t.push_str("What to try (not guaranteed to help):\n");
         for (i, r) in recs.iter().enumerate() {
             t.push_str(&format!("{}. {r}\n", i + 1));
         }

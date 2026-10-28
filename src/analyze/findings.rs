@@ -5,6 +5,16 @@ use std::collections::BTreeMap;
 use super::detect::{Analysis, Kind};
 use super::load::Data;
 
+/// A recording's length in words ("45 s", "23 min").
+fn length(secs: f64) -> String {
+    if secs < 90.0 { format!("{secs:.0} s") } else { format!("{:.0} min", secs / 60.0) }
+}
+
+/// A timer's period: whole seconds when it is close to one ("10"), else one decimal ("2.5").
+fn period_text(p: f64) -> String {
+    if (p - p.round()).abs() < 0.15 { format!("{:.0}", p.round()) } else { format!("{p:.1}") }
+}
+
 fn pct(x: f64) -> String {
     format!("{:.0}%", x * 100.0)
 }
@@ -159,7 +169,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     if let Some((k, n)) = r.second_timer {
         f.push(format!(
-            "{k} of {n} router freezes started at the same point within a second: something on a 1-second timer sets them off (typically the router or the network adapter's firmware). Interference or a weak signal would hit at random moments."
+            "Your freezes start at the same point in each second: {k} of {n} router freezes began within the same 150 ms of a second. Something runs on a 1-second timer: often the Wi-Fi adapter, its driver, or the router. Interference or a weak signal would hit at random moments."
         ));
     }
     // The general Wi-Fi advice above already covers an unstable router hop.
@@ -255,10 +265,10 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
                     period, period
                 ));
             }
+            // Core's wording (timer), plus where the app found it.
             clockwork = Some(format!(
-                "Every {:.1} s the {link} freezes for ~{:.0} ms and the game stream stalls with it: {}",
-                period,
-                gap_ms,
+                "Your connection freezes for about {gap_ms:.0} ms every {} seconds: {}",
+                period_text(period),
                 category_text(if is_wifi { "wifi" } else { "lan" })
             ));
         }
@@ -289,7 +299,7 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
                 rec.push(format!(
                     "The ~{p:.0} s pauses come from past your router, so changing Wi-Fi or router settings will not help. To narrow it down: (1) record a few minutes with a VPN on: if the pauses stay, they come from the modem / provider's gateway or the line, if they go away, from the provider's routing; (2) put the provider's gateway into bridge mode (or use your own modem) and record again; (3) report it to the provider with this recording."
                 ));
-                beyond = Some(format!("Every {p:.1} s the connection past your router pauses for ~{ms:.0} ms: the modem / provider's gateway or the provider"));
+                beyond = Some(format!("Your connection freezes for about {ms:.0} ms every {} seconds, past your router: the modem / provider's gateway or the provider", period_text(p)));
             }
         }
     }
@@ -434,6 +444,15 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     }
     let judged = r.verdicts.iter().filter(|v| v.category != "away").count();
     let away_marks = r.verdicts.len() - judged;
+    // Freezes: the game's data stalling often enough to matter (also used by the scorecard).
+    let play_s = if s.match_s > 0.0 { s.match_s } else { s.active_s };
+    let stalling = s.gaps_100ms >= 3 && s.gaps_100ms as f64 / (play_s / 60.0).max(1.0) >= 0.3;
+    let stall_ms = {
+        let mut v: Vec<f64> = r.anomalies.iter().filter(|a| a.kind == Kind::InGap && a.in_match && a.value >= 100.0).map(|a| a.value).collect();
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    let (clockwork_found, beyond_found) = (clockwork.is_some(), beyond.is_some());
     let headline = if let Some(c) = check_headline {
         c
     } else if let Some(c) = clockwork {
@@ -446,23 +465,29 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
             category_text(cat),
             if away_marks > 0 { format!(" ({away_marks} more marked while switched away from the game)") } else { String::new() }
         )
-    } else if s.gaps_100ms >= 3 && s.gaps_100ms as f64 / ((if s.match_s > 0.0 { s.match_s } else { s.active_s }) / 60.0).max(1.0) >= 0.3 {
+    } else if stalling {
+        // Core's wording (freezes), plus the likely cause.
         let gwc = r.gap_correlation.get(super::detect::GW_KEY).copied().unwrap_or(0.0);
         let fc = r.gap_correlation.get("frame hitch").copied().unwrap_or(0.0);
-        if gwc >= 0.4 {
-            format!("Game stalls mostly coincide with spikes on your first network hop ({}): {}", pct(gwc), category_text(if is_wifi { "wifi" } else { "lan" }))
+        let cause = if gwc >= 0.4 {
+            format!("most came with spikes on your first network hop ({}): {}", pct(gwc), category_text(if is_wifi { "wifi" } else { "lan" }))
         } else if fc >= 0.5 {
-            format!("Game stalls mostly coincide with frame hitches ({}): local PC", pct(fc))
+            format!("most came with frame hitches ({}): the PC itself", pct(fc))
         } else {
-            "Game stalls occur while your own network looks clean: path to / the game server itself".into()
-        }
+            "your own network looked clean: the path to the game server or the server itself".into()
+        };
+        format!("Your connection froze {} times in {} of play, for about {stall_ms:.0} ms each; {cause}", s.gaps_100ms, length(play_s))
     } else if upload_issue {
-        format!("Your uploads froze {} times (~{up_ms:.0} ms each) while the game's data kept arriving: {}", ups.len(), category_text(if is_wifi { "wifi" } else { "lan" }))
-    } else if s.gaps_100ms > 0 {
-        format!("No significant problems: only {} brief game-stream stall(s) in the whole session.", s.gaps_100ms)
+        format!("Your upload froze {} times in {} of play, for about {up_ms:.0} ms each: {}", ups.len(), length(play_s), category_text(if is_wifi { "wifi" } else { "lan" }))
+    } else if s.in_packets > 0 && !r.pauses.is_empty() {
+        let n = r.pauses.len();
+        format!("Mostly steady. {n} short {} in {} of play.", if n == 1 { "freeze" } else { "freezes" }, length(play_s))
+    } else if s.in_packets > 0 {
+        format!("Steady. No freezes in {} of play.", length(play_s))
     } else {
         "No significant problems detected in this session.".into()
     };
+    r.timer = if clockwork_found { Some("first_hop") } else if beyond_found { Some("beyond") } else { None };
 
     if !is_wifi && (gw_unstable || upload_issue || headline.contains("link to the router")) {
         rec.insert(0, "The link between the PC and the router is what stalls. If the PC connects through a powerline adapter, a mesh node or a switch, test with a cable straight to the router; otherwise try another cable and router port, update the network adapter's driver, and restart the router.".into());
@@ -482,7 +507,11 @@ pub fn summarize(d: &Data, r: &mut Analysis) {
     let look: Vec<&str> = r.health.iter().filter(|h| h.status == "warn").map(|h| h.area.as_str()).collect();
     if r.headline.starts_with("No significant problems") && !look.is_empty() {
         r.headline = format!("No lag problems found, but worth a look: {}", look.join(", "));
+    } else if (r.headline.starts_with("Steady.") || r.headline.starts_with("Mostly steady.")) && !look.is_empty() {
+        r.headline = format!("{} Worth a look: {}.", r.headline, look.join(", "));
     }
+    let froze = r.timer.is_some() || r.second_timer.is_some() || stalling || upload_issue;
+    super::goodfor::grade(d, r, froze);
     r.background_cpu = checks.background;
     r.hitch_procs = checks.hitch_procs;
 }

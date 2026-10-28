@@ -106,6 +106,9 @@ pub struct ProbeStats {
     pub p99_ms: f64,
     pub max_ms: f64,
     pub spikes: usize,
+    /// Jitter as Cloudflare and LagScope Pulse define it (lagscope-core): the average change
+    /// between consecutive round trips.
+    pub jitter_ms: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -149,6 +152,22 @@ pub struct FrameStats {
     pub low1_fps: f64,
     pub hitches_50ms: usize,
     pub hitches_100ms: usize,
+}
+
+/// One pause of the game's data (the "every pause" list).
+#[derive(Debug, Clone, Serialize)]
+pub struct Pause {
+    /// Start, seconds from the start of the recording.
+    pub t: f64,
+    /// "down" (server to you) or "up" (you to the server).
+    pub dir: &'static str,
+    pub ms: f64,
+    /// "held" (the packets then arrived together), "lost" (they never came: lost on the way or
+    /// not sent by the server; the game's packets carry no number LagScope can read) or
+    /// "not sent" (this PC sent nothing).
+    pub what: &'static str,
+    /// Likely cause: a verdict category (`findings::category_text`).
+    pub cause: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,6 +235,15 @@ pub struct Analysis {
     pub background_cpu: Vec<(String, f64, f64)>,
     /// Programs busy during frame hitches: (name, hitches).
     pub hitch_procs: Vec<(String, usize)>,
+    /// A timer on the connection: "first_hop" (the Wi-Fi / link to the router) or "beyond"
+    /// (past the router).
+    pub timer: Option<&'static str>,
+    /// Every pause of the game's data during play (100 ms or more), with its likely cause.
+    pub pauses: Vec<Pause>,
+    /// "Good for" gaming, video calls and streaming (lagscope-core's grades, as in Pulse).
+    pub good_for: Vec<super::goodfor::GoodFor>,
+    /// Where the ping-under-load and speed figures came from (a busy-connection test).
+    pub good_for_from: Option<String>,
     pub findings: Vec<String>,
     pub recommendations: Vec<String>,
     pub headline: String,
@@ -327,6 +355,7 @@ fn probe_analysis(target: &str, v: &[Probe], ips: &[(i64, String)], out: &mut Ve
         p99_ms: percentile(&ok, 0.99),
         max_ms: ok.last().copied().unwrap_or(0.0),
         spikes: 0,
+        jitter_ms: lagscope_core::stream::jitter(&v.iter().filter(|p| p.rtt >= 0).map(|p| p.rtt as f64 / 1000.0).collect::<Vec<_>>()),
     };
     if ok.len() < 20 {
         return st;
@@ -1103,6 +1132,26 @@ fn verdict_window(an: &[Anomaly], t: i64, n: usize, a: i64, b: i64, is_wifi: boo
     Verdict { t, n, culprit, category, confidence, evidence: ev }
 }
 
+/// Every game-data pause of 100 ms or more during play, judged like a mark on a narrow
+/// window around it (at most the first 2000).
+fn every_pause(an: &[Anomaly], wifi: bool) -> Vec<Pause> {
+    an.iter()
+        .filter(|a| matches!(a.kind, Kind::InGap | Kind::OutGap) && a.in_match && a.value >= 100.0)
+        .take(2000)
+        .map(|a| {
+            let down = a.kind == Kind::InGap;
+            let v = verdict_window(an, a.t, 0, a.t - 500_000, a.end() + 500_000, wifi);
+            Pause {
+                t: a.t as f64 / 1e6,
+                dir: if down { "down" } else { "up" },
+                ms: a.value,
+                what: if !down { "not sent" } else if a.target.ends_with("|burst") { "held" } else { "lost" },
+                cause: v.category,
+            }
+        })
+        .collect()
+}
+
 pub fn analyze(d: &Data) -> Analysis {
     let mut an: Vec<Anomaly> = Vec::new();
     let mut res = Analysis::default();
@@ -1132,7 +1181,6 @@ pub fn analyze(d: &Data) -> Analysis {
             }
         }
         let iv: Vec<(i64, f64)> = ticks.windows(2).map(|w| (w[1], (w[1] - w[0]) as f64)).filter(|x| x.1 < 1e6 && in_phases(&phases, x.0)).collect();
-        let jit: Vec<f64> = iv.windows(2).map(|w| (w[1].1 - w[0].1).abs()).collect();
         res.stream = StreamStats {
             endpoints: servers.iter().map(|&i| d.endpoints[i as usize].clone()).collect(),
             in_packets: inbound.len(),
@@ -1146,7 +1194,7 @@ pub fn analyze(d: &Data) -> Analysis {
             gaps_100ms: counted.iter().filter(|g| g.value >= 100.0).count(),
             gaps_250ms: counted.iter().filter(|g| g.value >= 250.0).count(),
             burst_gaps: counted.iter().filter(|g| g.target.ends_with("|burst")).count(),
-            jitter_ms: if jit.is_empty() { 0.0 } else { jit.iter().sum::<f64>() / jit.len() as f64 / 1000.0 },
+            jitter_ms: lagscope_core::stream::jitter(&iv.iter().map(|x| x.1).collect::<Vec<_>>()) / 1000.0,
             match_s: phases.iter().map(|(a, b)| (b - a) as f64 / 1e6).sum(),
         };
         an.extend(gaps_in);
@@ -1348,6 +1396,7 @@ pub fn analyze(d: &Data) -> Analysis {
     res.wifi_check = super::experiments::from_session(d);
     res.driver_cmds = driver_cmd_correlation(d, &an);
     res.verdicts = d.marks.iter().enumerate().map(|(i, &t)| verdict_for(&an, t, i + 1, !wired, &res.away)).collect();
+    res.pauses = every_pause(&an, !wired);
     res.anomalies = an;
     super::findings::summarize(d, &mut res);
     res

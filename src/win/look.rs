@@ -117,7 +117,7 @@ pub fn panel(top: bool) -> egui::Frame {
 /// A status mark: a round dot for "fine", a square for "worth a look" and "not measured".
 pub fn status_mark(ui: &mut egui::Ui, status: &str) {
     let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    let (color, round) = t::status(status);
+    let (color, round, _) = t::status(status);
     if round {
         ui.painter().circle_filled(r.center(), 4.5, c(color));
     } else {

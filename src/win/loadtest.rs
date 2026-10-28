@@ -4,6 +4,9 @@
 //! WinHTTP). If latency climbs a lot under load, a queue somewhere (Wi-Fi link, router,
 //! modem / ISP) is oversized; whether the router ping climbs too tells which side.
 //!
+//! Judged like LagScope Pulse (lagscope-core): worth a look when the ping rises more than
+//! 50 ms, with the shared wording, and graded for gaming, video calls and streaming.
+//!
 //! This is LagScope's only feature that sends real traffic to the internet, so it is
 //! opt-in and capped (see `MAX_DOWN` / `MAX_UP`).
 
@@ -36,19 +39,28 @@ pub struct Phase {
     pub router_p95: f64,
     pub internet_p50: f64,
     pub internet_p95: f64,
+    /// Jitter of the internet pings (lagscope-core's definition).
+    pub internet_jitter: f64,
     pub lost: usize,
     pub samples: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct LoadResult {
+    /// The router it ran behind (its address), so recordings on the same network can use it.
+    pub gateway: String,
     pub idle: Phase,
     pub download: Phase,
     pub upload: Phase,
     pub down_mbps: f64,
     pub up_mbps: f64,
-    pub grade_down: String,
-    pub grade_up: String,
+    /// How much the internet ping rose while downloading / uploading (ms); None = no internet
+    /// ping was answered in that phase (not measured, never "no rise").
+    pub extra_down_ms: Option<f64>,
+    pub extra_up_ms: Option<f64>,
+    /// Worth a look: the ping rose more than `WARN_MS`.
+    pub warn: bool,
+    pub good_for: Vec<crate::analyze::goodfor::GoodFor>,
     pub summary: Vec<String>,
     pub recommendations: Vec<String>,
 }
@@ -144,28 +156,21 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 fn phase(samples: &[(Instant, &str, Option<f64>)], from: Instant, to: Instant) -> Phase {
     let pick = |target: &str| -> Vec<f64> { samples.iter().filter(|s| s.1 == target && s.0 >= from && s.0 < to).filter_map(|s| s.2).collect() };
     let (mut r, mut i) = (pick("router"), pick("internet"));
+    let internet_jitter = lagscope_core::stream::jitter(&i);
     let all: Vec<&(Instant, &str, Option<f64>)> = samples.iter().filter(|s| s.0 >= from && s.0 < to).collect();
     Phase {
         router_p50: pct(&mut r, 0.5),
         router_p95: pct(&mut r, 0.95),
         internet_p50: pct(&mut i, 0.5),
         internet_p95: pct(&mut i, 0.95),
+        internet_jitter,
         lost: all.iter().filter(|s| s.2.is_none()).count(),
         samples: all.len(),
     }
 }
 
-/// Bufferbloat grade from the latency increase under load (like common online tests).
-pub fn grade(increase_ms: f64) -> &'static str {
-    match increase_ms {
-        x if x < 5.0 => "A+",
-        x if x < 30.0 => "A",
-        x if x < 60.0 => "B",
-        x if x < 200.0 => "C",
-        x if x < 400.0 => "D",
-        _ => "F",
-    }
-}
+/// A rise above this under load is worth a look (as in LagScope Pulse).
+pub const WARN_MS: f64 = 50.0;
 
 /// Runs the whole test (about 40 s). `progress` gets short status lines.
 pub fn run(progress: &dyn Fn(String)) -> Result<LoadResult> {
@@ -244,6 +249,7 @@ pub fn run(progress: &dyn Fn(String)) -> Result<LoadResult> {
     }
     let s = samples.lock().unwrap();
     let mut res = LoadResult {
+        gateway: gw.to_string(),
         idle: phase(&s, marks[0], marks[1]),
         download: phase(&s, marks[2], marks[3]),
         upload: phase(&s, marks[4], marks[5]),
@@ -255,43 +261,72 @@ pub fn run(progress: &dyn Fn(String)) -> Result<LoadResult> {
     Ok(res)
 }
 
-/// Pure part (unit-tested): grades and plain-language result.
+impl LoadResult {
+    /// "+3 ms while downloading, +26 ms while uploading".
+    pub fn rise_text(&self) -> String {
+        let one = |x: Option<f64>, what: &str| match x {
+            Some(ms) => format!("+{ms:.0} ms while {what}"),
+            None => format!("no internet ping answered while {what}"),
+        };
+        format!("{}, {}", one(self.extra_down_ms, "downloading"), one(self.extra_up_ms, "uploading"))
+    }
+}
+
+/// Pure part (unit-tested): judgement, grades and plain-language result. The sentences
+/// follow lagscope-core's design/wording.md (`load`).
 pub fn interpret(res: &mut LoadResult) {
-    let inc = |p: &Phase| (p.internet_p50 - res.idle.internet_p50).max(0.0);
+    // A phase without a single answered internet ping says nothing about the rise.
+    let inc = |p: &Phase| (p.internet_p50 > 0.0).then(|| (p.internet_p50 - res.idle.internet_p50).max(0.0));
     let rinc = |p: &Phase| (p.router_p50 - res.idle.router_p50).max(0.0);
-    let (dn, up) = (inc(&res.download), inc(&res.upload));
-    res.grade_down = grade(dn).into();
-    res.grade_up = grade(up).into();
-    res.summary = vec![
-        format!("Speed: {:.0} Mbit/s down, {:.0} Mbit/s up.", res.down_mbps, res.up_mbps),
-        format!(
-            "Internet ping: {:.0} ms idle, {:.0} ms while downloading (+{dn:.0}, grade {}), {:.0} ms while uploading (+{up:.0}, grade {}).",
-            res.idle.internet_p50, res.download.internet_p50, res.grade_down, res.upload.internet_p50, res.grade_up
-        ),
-        format!(
-            "Router ping: {:.0} ms idle, {:.0} ms while downloading, {:.0} ms while uploading.",
-            res.idle.router_p50, res.download.router_p50, res.upload.router_p50
-        ),
-    ];
+    res.extra_down_ms = inc(&res.download);
+    res.extra_up_ms = inc(&res.upload);
+    let (dn, up) = (res.extra_down_ms.unwrap_or(0.0), res.extra_up_ms.unwrap_or(0.0));
     let worst = dn.max(up);
-    let dir = if up > dn { "uploading" } else { "downloading" };
-    if worst < 30.0 {
-        res.summary.push("No bufferbloat: latency stays low even when the connection is full. Other people's downloads/uploads should not cause lag.".into());
+    res.warn = worst > WARN_MS;
+    res.good_for = crate::analyze::goodfor::for_load_test(&serde_json::to_value(&*res).unwrap_or_default());
+    res.summary = Vec::new();
+    if res.warn {
+        res.summary.push(format!(
+            "Your ping jumps by about {worst:.0} ms while someone {}. When the line is full, packets wait in a queue, usually in the router or modem. Games feel that as lag whenever someone at home streams, downloads or backs up files. It is called bufferbloat, and it can often be fixed in the router.",
+            if up > dn { "uploads" } else { "downloads" }
+        ));
+    } else if res.extra_down_ms.is_none() && res.extra_up_ms.is_none() {
+        res.summary.push("Ping under load could not be measured: no internet ping was answered while the line was full. Run the test again.".into());
+    } else {
+        res.summary.push("No ping jumps under load: other people's downloads and uploads should not cause lag.".into());
+    }
+    res.summary.push(format!("Speed: {:.0} Mbit/s down, {:.0} Mbit/s up.", res.down_mbps, res.up_mbps));
+    res.summary.push(format!(
+        "Internet ping: {:.0} ms idle (jitter {:.1} ms), {} while downloading, {} while uploading. Router ping: {:.0} / {:.0} / {:.0} ms.",
+        res.idle.internet_p50,
+        res.idle.internet_jitter,
+        answered(res.download.internet_p50),
+        answered(res.upload.internet_p50),
+        res.idle.router_p50,
+        res.download.router_p50,
+        res.upload.router_p50
+    ));
+    if !res.warn {
         return;
     }
     // Where does the queue build up? If the router ping rises about as much, the queue is
     // on the PC's own link (Wi-Fi airtime / adapter); otherwise in the router / modem / ISP.
     let rworst = if up > dn { rinc(&res.upload) } else { rinc(&res.download) };
     if rworst >= worst * 0.6 {
-        res.summary.push(format!("Latency rises by {worst:.0} ms while {dir}, and the router ping rises with it: the queue builds up on this PC's own link to the router (usually Wi-Fi)."));
+        res.summary.push("The router ping rises with it: the queue builds up on this PC's own link to the router (usually Wi-Fi).".into());
         res.recommendations.push("The delay builds up on the Wi-Fi link itself: move closer to the router, use 5 GHz, or use a cable; a heavy download on this PC will make games lag.".into());
     } else {
-        res.summary.push(format!("Latency rises by {worst:.0} ms while {dir}, but the router ping stays low: the queue is in the router / modem / ISP (classic bufferbloat)."));
-        res.recommendations.push("Bufferbloat in the router/modem: if the router has Smart Queue Management (SQM), \"Smart QoS\", \"Adaptive QoS\" or similar, turn it on and set it to ~90% of your speeds. Without it, any big download or upload in the house (cloud backup, game updates, video uploads) will make games lag.".into());
+        res.summary.push("The router ping stays low: the queue is in the router, the modem or the provider's network.".into());
+        res.recommendations.push("Look for \"Smart Queue\", \"SQM\", \"QoS\" or \"bufferbloat\" in your router's settings, and set it a little below your measured speed. If your router has none of these, a router with Smart Queue support can usually fix it. Until then, pause big downloads and uploads while you play.".into());
         if up > dn * 1.5 {
             res.recommendations.push("Uploads hurt most: pause cloud backups / photo sync / streaming uploads while playing.".into());
         }
     }
+}
+
+/// A phase's median ping, or "no answer" when none came back.
+fn answered(p50: f64) -> String {
+    if p50 > 0.0 { format!("{p50:.0} ms") } else { "no answer".into() }
 }
 
 #[cfg(test)]
@@ -306,12 +341,21 @@ mod tests {
     fn grades_and_location() {
         let mut r = LoadResult { idle: ph(3.0, 12.0), download: ph(4.0, 20.0), upload: ph(4.0, 250.0), down_mbps: 300.0, up_mbps: 20.0, ..Default::default() };
         interpret(&mut r);
-        assert_eq!((r.grade_down.as_str(), r.grade_up.as_str()), ("A", "D"));
-        assert!(r.summary.iter().any(|s| s.contains("router / modem / ISP")), "{:?}", r.summary);
+        assert!(r.warn && r.summary[0].starts_with("Your ping jumps by about 238 ms while someone uploads"), "{:?}", r.summary);
+        assert!(r.summary.iter().any(|s| s.contains("router, the modem or the provider")), "{:?}", r.summary);
         assert!(r.recommendations.iter().any(|s| s.contains("SQM")));
+        assert_eq!(r.good_for.len(), 3);
         let mut w = LoadResult { idle: ph(3.0, 12.0), download: ph(150.0, 160.0), upload: ph(5.0, 14.0), ..Default::default() };
         interpret(&mut w);
         assert!(w.summary.iter().any(|s| s.contains("own link")), "{:?}", w.summary);
-        assert_eq!(grade(2.0), "A+");
+        let mut f = LoadResult { idle: ph(3.0, 12.0), download: ph(4.0, 40.0), upload: ph(4.0, 30.0), ..Default::default() };
+        interpret(&mut f);
+        assert!(!f.warn && f.recommendations.is_empty(), "{:?}", f.summary);
+        // No internet ping answered while downloading: not measured, not "+0 ms".
+        let mut n = LoadResult { idle: ph(3.0, 18.0), download: ph(70.0, 0.0), upload: ph(4.0, 44.0), down_mbps: 500.0, ..Default::default() };
+        interpret(&mut n);
+        assert_eq!((n.extra_down_ms, n.extra_up_ms), (None, Some(26.0)));
+        assert!(n.rise_text().starts_with("no internet ping answered while downloading"), "{}", n.rise_text());
+        assert!(n.summary.iter().any(|s| s.contains("no answer while downloading")), "{:?}", n.summary);
     }
 }
