@@ -253,6 +253,7 @@ pub fn render(d: &Data, a: &Analysis) -> String {
     // Escape "</" so embedded strings cannot terminate the script tag.
     let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");
     TEMPLATE
+        .replace("/*THEME_CSS*/", crate::theme::REPORT_CSS)
         .replace("/*UPLOT_CSS*/", UPLOT_CSS)
         .replace("/*UPLOT_JS*/", UPLOT_JS)
         .replace("/*DATA*/", &json)

@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText};
 
+use super::look::{self, c};
 use super::{capture, console, fixes, hotkey, wificheck};
+use crate::theme as t;
 use crate::app::{App, Config};
 use crate::profile::{self, Profile};
 
@@ -204,7 +206,7 @@ pub fn run(cfg: Config, selftest: Option<(String, PathBuf)>) -> Result<()> {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            ctx.set_visuals(egui::Visuals::dark());
+            look::apply(&ctx);
             let l1 = log.clone();
             let c1 = ctx.clone();
             crate::ui::set_sink(move |line| {
@@ -574,17 +576,19 @@ impl GuiApp {
                 ui.label(RichText::new("Stopping and building the report ...  (working)").italics());
             }
             Task::Failed(e) => {
-                ui.colored_label(Color32::LIGHT_RED, format!("Failed: {e}"));
+                ui.colored_label(ui.visuals().error_fg_color, format!("Failed: {e}"));
             }
             Task::Done(f) => {
                 let f = f.clone();
                 drop(s);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                let frame = if f.discarded { look::card() } else { look::verdict(headline_ok(&f.headline)) };
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     if f.discarded {
                         ui.label("Stopped after a few seconds: too short to analyse, nothing was saved.");
                         return;
                     }
-                    ui.add(egui::Label::new(RichText::new(&f.headline).size(17.0).strong().color(headline_color(ui, &f.headline))).wrap());
+                    ui.add(egui::Label::new(RichText::new(&f.headline).font(look::display(18.0)).color(headline_color(ui, &f.headline))).wrap());
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if let Some(r) = &f.report {
@@ -653,8 +657,8 @@ impl GuiApp {
             let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
             // Blinks once a second (the view repaints at 1 Hz anyway).
             let on = started.elapsed().as_secs() % 2 == 0;
-            ui.painter().circle_filled(r.center(), 7.0, if on { Color32::from_rgb(230, 70, 70) } else { Color32::from_rgb(120, 40, 40) });
-            ui.label(RichText::new(format!("{} {:02}:{:02}:{:02}", if check { "Wi-Fi check" } else { "Recording" }, secs / 3600, (secs / 60) % 60, secs % 60)).size(20.0).strong());
+            ui.painter().circle_filled(r.center(), 7.0, c(if on { t::MINT } else { t::MINT_BG }));
+            ui.label(RichText::new(format!("{} {:02}:{:02}:{:02}", if check { "Wi-Fi check" } else { "Recording" }, secs / 3600, (secs / 60) % 60, secs % 60)).font(look::display(20.0)).color(c(t::TEXT)));
             ui.add_space(16.0);
             if !check {
                 ui.label(RichText::new(format!("Marks: {}", l.marks)).size(16.0));
@@ -679,7 +683,7 @@ impl GuiApp {
                 ui.label(RichText::new("Game").strong());
                 let pid = app.game_pid.load(std::sync::atomic::Ordering::Relaxed);
                 if pid == 0 {
-                    ui.colored_label(Color32::YELLOW, format!("waiting for {}", app.game_name()));
+                    ui.colored_label(c(t::YELLOW), format!("waiting for {}", app.game_name()));
                 } else {
                     let server = app.server.lock().unwrap().map(|s| s.to_string()).unwrap_or("detecting ...".into());
                     let net = if now - l.game_net_updated_us < 2_500_000 {
@@ -733,10 +737,10 @@ impl GuiApp {
         let cols = if w > 760.0 { 2 } else { 1 };
         let cw = (w - 12.0 * (cols as f32 - 1.0)) / cols as f32;
         let charts: Vec<(&str, &VecDeque<f32>, f32, Color32)> = vec![
-            ("Router ping (ms)", &self.h_router, 20.0, Color32::from_rgb(90, 160, 255)),
-            ("Game: longest gap between packets (ms)", &self.h_gap, 100.0, Color32::from_rgb(255, 160, 70)),
-            ("Worst frame time (ms)", &self.h_frame, 33.0, Color32::from_rgb(120, 210, 140)),
-            ("Slowest driver (ms)", &self.h_driver, 1.0, Color32::from_rgb(200, 140, 255)),
+            ("Router ping (ms)", &self.h_router, 20.0, c(t::CHART_LINE)),
+            ("Game: longest gap between packets (ms)", &self.h_gap, 100.0, c(t::CHART_FREEZE)),
+            ("Worst frame time (ms)", &self.h_frame, 33.0, c(t::CHART_LINE)),
+            ("Slowest driver (ms)", &self.h_driver, 1.0, c(t::CHART_LINE)),
         ];
         egui::Grid::new("charts").num_columns(cols).spacing([12.0, 10.0]).show(ui, |ui| {
             for (i, (title, data, floor, color)) in charts.iter().enumerate() {
@@ -843,7 +847,7 @@ impl GuiApp {
                     ui.label(RichText::new(&j.status).italics());
                 }
                 Some(Err(e)) => {
-                    ui.colored_label(Color32::LIGHT_RED, e);
+                    ui.colored_label(ui.visuals().error_fg_color, e);
                 }
                 Some(Ok(r)) => {
                     ui.label(RichText::new(if r.name.is_empty() { "Unknown router".to_string() } else { r.name.clone() }).size(16.0).strong());
@@ -880,16 +884,16 @@ impl GuiApp {
             match &j.result {
                 Some(Ok(l)) => {
                     let gc = |g: &str| match g {
-                        "A+" | "A" => Color32::from_rgb(110, 210, 120),
-                        "B" => Color32::from_rgb(230, 200, 90),
-                        _ => Color32::from_rgb(240, 110, 100),
+                        "A+" | "A" => c(t::MINT),
+                        "B" => c(t::YELLOW),
+                        _ => c(t::ORANGE),
                     };
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Download").strong());
-                        ui.label(RichText::new(&l.grade_down).size(20.0).color(gc(&l.grade_down)).strong());
+                        ui.label(RichText::new(&l.grade_down).font(look::display(22.0)).color(gc(&l.grade_down)));
                         ui.add_space(14.0);
                         ui.label(RichText::new("Upload").strong());
-                        ui.label(RichText::new(&l.grade_up).size(20.0).color(gc(&l.grade_up)).strong());
+                        ui.label(RichText::new(&l.grade_up).font(look::display(22.0)).color(gc(&l.grade_up)));
                     });
                     for x in l.summary.iter() {
                         ui.add(egui::Label::new(x).wrap());
@@ -899,7 +903,7 @@ impl GuiApp {
                     }
                 }
                 Some(Err(e)) => {
-                    ui.colored_label(Color32::LIGHT_RED, format!("Test failed: {e}"));
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Test failed: {e}"));
                 }
                 None => {}
             }
@@ -955,7 +959,7 @@ impl GuiApp {
                     }
                 }
                 Some(Err(e)) => {
-                    ui.colored_label(Color32::LIGHT_RED, e);
+                    ui.colored_label(ui.visuals().error_fg_color, e);
                 }
                 None => {}
             }
@@ -1034,18 +1038,18 @@ impl GuiApp {
                             ui.label(r.label);
                             ui.add(egui::Label::new(&r.a).wrap());
                             let color = match r.change {
-                                1 => Color32::from_rgb(110, 210, 120),
-                                -1 => Color32::from_rgb(240, 110, 100),
+                                1 => look::c(t::MINT),
+                                -1 => look::c(t::ORANGE),
                                 _ => ui.visuals().text_color(),
                             };
                             ui.add(egui::Label::new(RichText::new(&r.b).color(color)).wrap());
                             ui.end_row();
                         }
                     });
-                    hint(ui, "Green = better in B, red = worse in B.");
+                    hint(ui, "Green = better in B, orange = worse in B.");
                 }
                 Err(e) => {
-                    ui.colored_label(Color32::LIGHT_RED, format!("Could not compare: {e}"));
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Could not compare: {e}"));
                     if ui.button("Back").clicked() {
                         back = true;
                     }
@@ -1069,7 +1073,7 @@ impl GuiApp {
         let mut toggle: Option<PathBuf> = None;
         let mut copied: Option<PathBuf> = None;
         for r in &self.sessions {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            look::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     if r.game == "Network test" {
@@ -1117,7 +1121,7 @@ impl GuiApp {
                 });
                 ui.add(egui::Label::new(RichText::new(&r.headline).color(headline_color(ui, &r.headline))).wrap());
                 if !r.warn.is_empty() {
-                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).size(12.5).color(Color32::from_rgb(235, 185, 90)));
+                    ui.label(RichText::new(format!("Look at: {}", r.warn.join(", "))).size(12.5).color(c(t::ORANGE)));
                 }
             });
         }
@@ -1464,7 +1468,7 @@ impl eframe::App for GuiApp {
 
         let busy = self.shared.lock().unwrap().task.busy();
 
-        egui::Panel::top("top").show(ui, |ui| {
+        egui::Panel::top("top").frame(look::panel(true)).show(ui, |ui| {
             ui.add_space(4.0);
             self.top_bar(ui);
             ui.add_space(2.0);
@@ -1472,7 +1476,7 @@ impl eframe::App for GuiApp {
         if self.show_log {
             egui::Panel::bottom("log").resizable(true).default_size(180.0).show(ui, |ui| self.log_panel(ui));
         }
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default().frame(look::panel(false)).show(ui, |ui| {
             if self.close_when_done {
                 ui.label(RichText::new("Finishing the recording before closing ...").italics());
             }
@@ -1494,22 +1498,21 @@ impl eframe::App for GuiApp {
 
 /// The main action of a page: large and coloured.
 fn big_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
-    let b = egui::Button::new(RichText::new(text).size(17.0).color(Color32::WHITE)).fill(Color32::from_rgb(38, 110, 190)).min_size(egui::vec2(170.0, 36.0));
+    let b = egui::Button::new(RichText::new(text).font(look::display(16.0)).color(c(t::MINT_INK)))
+        .fill(c(t::MINT))
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(egui::CornerRadius::same(255))
+        .min_size(egui::vec2(180.0, t::TOUCH_TARGET));
     ui.add_enabled(enabled, b)
 }
 
-/// The report's scorecard: a coloured dot, the area and a few words per line.
+/// The report's scorecard: a status mark (round = fine, square = worth a look or not
+/// measured), the area and a few words per line.
 fn scorecard(ui: &mut egui::Ui, rows: &[HealthRow]) {
     egui::Grid::new("score").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
         for (area, status, text) in rows {
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                let c = match status.as_str() {
-                    "ok" => Color32::from_rgb(110, 210, 120),
-                    "warn" => Color32::from_rgb(235, 185, 90),
-                    _ => ui.visuals().weak_text_color(),
-                };
-                ui.painter().circle_filled(r.center(), 4.5, c);
+                look::status_mark(ui, status);
                 ui.label(RichText::new(area).strong());
             });
             let t = RichText::new(text);
@@ -1524,7 +1527,6 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
 }
 
-/// Green for a clean result, amber when the report found something.
 /// Self-test: saves a screenshot of the window as `<out>/<name>.bmp` once it is rendered.
 fn save_screenshot(ctx: &egui::Context, out: &std::path::Path, name: String) {
     let path = out.join(format!("{name}.bmp"));
@@ -1566,20 +1568,24 @@ fn share_buttons(ui: &mut egui::Ui, dir: &std::path::Path) -> Option<Share> {
 fn copied_note(ui: &mut egui::Ui, copied: &Option<(PathBuf, Instant)>, dir: &std::path::Path) {
     if let Some((d, t)) = copied {
         if d == dir && t.elapsed() < Duration::from_secs(3) {
-            ui.label(RichText::new("Copied").color(Color32::from_rgb(110, 210, 120)));
+            ui.label(RichText::new("Copied").color(c(t::MINT)));
             ui.ctx().request_repaint_after(Duration::from_secs(3));
         }
     }
 }
 
 fn headline_color(ui: &egui::Ui, h: &str) -> Color32 {
-    if h.starts_with("No significant") || h.starts_with("No problems") {
-        Color32::from_rgb(110, 210, 120)
+    if headline_ok(h) {
+        c(t::MINT)
     } else if h.starts_with("Network test") || h.starts_with('(') || h == "..." {
         ui.visuals().text_color()
     } else {
-        Color32::from_rgb(235, 185, 90)
+        c(t::ORANGE)
     }
+}
+
+fn headline_ok(h: &str) -> bool {
+    h.starts_with("No significant") || h.starts_with("No problems")
 }
 
 /// Small line chart of the last two minutes; NaN = no data.
@@ -1587,10 +1593,15 @@ fn sparkline(ui: &mut egui::Ui, title: &str, data: &VecDeque<f32>, floor: f32, c
     ui.vertical(|ui| {
         let last = data.iter().rev().find(|v| v.is_finite()).copied();
         let max = data.iter().copied().filter(|v| v.is_finite()).fold(floor, f32::max);
-        ui.label(format!("{title}   {}", last.map(|v| format!("now {v:.1}")).unwrap_or_default()));
+        ui.horizontal(|ui| {
+            ui.label(title);
+            if let Some(v) = last {
+                ui.label(RichText::new(format!("now {v:.1}")).font(look::mono(12.0)).color(c(t::TEXT)));
+            }
+        });
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+        p.rect_filled(rect, 10.0, ui.visuals().extreme_bg_color);
         let n = HISTORY as f32;
         let mut seg: Vec<egui::Pos2> = Vec::new();
         let flush = |seg: &mut Vec<egui::Pos2>| {
@@ -1610,7 +1621,7 @@ fn sparkline(ui: &mut egui::Ui, title: &str, data: &VecDeque<f32>, floor: f32, c
             seg.push(egui::pos2(x, y));
         }
         flush(&mut seg);
-        p.text(rect.right_top() + egui::vec2(-4.0, 2.0), egui::Align2::RIGHT_TOP, format!("{max:.0}"), egui::FontId::proportional(10.0), ui.visuals().weak_text_color());
+        p.text(rect.right_top() + egui::vec2(-4.0, 2.0), egui::Align2::RIGHT_TOP, format!("{max:.0}"), look::mono(10.0), ui.visuals().weak_text_color());
     });
 }
 
@@ -1625,11 +1636,11 @@ fn icon() -> egui::IconData {
             let d = (dx * dx + dy * dy).sqrt();
             let blip = ((x as f32 - 42.0).powi(2) + (y as f32 - 22.0).powi(2)).sqrt();
             let px = if blip < 6.0 {
-                [255, 90, 80, 255]
+                [t::ORANGE.0[0], t::ORANGE.0[1], t::ORANGE.0[2], 255]
             } else if (d - 28.0).abs() < 3.0 || (d - 16.0).abs() < 1.5 || (dx.abs() < 1.2 && d < 28.0) || (dy.abs() < 1.2 && d < 28.0) {
-                [90, 200, 255, 255]
+                [t::MINT.0[0], t::MINT.0[1], t::MINT.0[2], 255]
             } else if d < 30.0 {
-                [18, 30, 44, 255]
+                [t::SURFACE.0[0], t::SURFACE.0[1], t::SURFACE.0[2], 255]
             } else {
                 [0, 0, 0, 0]
             };

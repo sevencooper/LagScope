@@ -916,11 +916,21 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "lagscope-core",
  "nvml-wrapper",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "lagscope-core"
+version = "0.1.0"
+source = "git+https://github.com/sevencooper/lagscope-core?tag=v0.1.0#6ff949f6d3506c1e59840eea7a718b1e2d0dcd84"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ cargo xwin build --release --target x86_64-pc-windows-msvc
 rm -rf dist && mkdir -p dist/LagScope
 cp target/x86_64-pc-windows-msvc/release/lagscope.exe dist/LagScope/
 cp README.txt PRIVACY.md LICENSE dist/LagScope/
+cp src/fonts/OFL.txt dist/LagScope/FONTS-OFL.txt
 (cd dist && python3 -c "import shutil; shutil.make_archive('LagScope', 'zip', '.', 'LagScope')")
 echo "built: dist/LagScope/lagscope.exe ($(du -h dist/LagScope/lagscope.exe | cut -f1)), dist/LagScope.zip"
 # Optional: copy to a Windows folder for testing, e.g. ./build.sh /mnt/c/Users/me/Desktop/LagScope

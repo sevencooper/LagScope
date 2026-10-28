@@ -114,3 +114,4 @@ Layout:
 - `src/analyze/share.rs`: "Copy summary", "Copy AI prompt" and the `AI_GUIDE.md` written into each recording.
 - `src/analyze/`: platform-independent analysis and report generation.
 - `src/report/`: the HTML template and the bundled uPlot charting library.
+- `src/theme.rs`, `src/win/look.rs`, `src/fonts/`: the look shared with LagScope Pulse. `build.rs` reads the colours, radii, fonts and status shapes from [lagscope-core](https://github.com/sevencooper/lagscope-core)'s `design/tokens.json` at the version pinned in `Cargo.toml` (set `LAGSCOPE_CORE_DIR` to use a local checkout). The fonts are under the SIL Open Font License (`src/fonts/OFL.txt`).

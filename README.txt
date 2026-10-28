@@ -16,10 +16,10 @@ Record (the main thing)
 2. Play as usual. Press F8 whenever it feels laggy (you hear a beep).
 3. Click Stop & build report, then Open report.
 
-The coloured line at the top is the verdict. Under it, one dot per area
+The card at the top is the verdict. Under it, one mark per area
 (Wi-Fi, internet, frames, CPU, GPU, memory, disk, drivers, display & power,
 hardware setup):
-green is fine, amber is worth a look. "What to try" lists the next steps.
+a green dot is fine, an orange square is worth a look, a grey square was not measured. "What to try" lists the next steps.
 How it all works (what is measured where): docs/HOW_IT_WORKS.md on the project page,
 https://github.com/sevencooper/LagScope
 
