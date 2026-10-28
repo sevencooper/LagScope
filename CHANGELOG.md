@@ -6,6 +6,8 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+## 0.7.0 (2026-10-27)
+
 - **New look, shared with LagScope Pulse:** the window and the HTML report use the same
   colours, fonts and shapes as the Pulse website (dark background, mint for steady and fine,
   orange for freezes and anything worth a look). The result is shown as a verdict card. In the
