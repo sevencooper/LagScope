@@ -6,6 +6,9 @@ not how it was built. New changes go under "Unreleased"; see [docs/RELEASING.md]
 
 ## Unreleased
 
+- **Copy summary and Copy AI prompt now copy:** they showed "Copied" but left the
+  clipboard empty.
+
 ## 0.7.0 (2026-10-27)
 
 - **New look, shared with LagScope Pulse:** the window and the HTML report use the same

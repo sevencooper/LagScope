@@ -22,7 +22,8 @@ serde_json = "1"
 [target.'cfg(windows)'.dependencies]
 nvml-wrapper = "0.13"
 # GUI: OpenGL renderer, no persistence/accessibility extras (small, low overhead).
-eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+# "clipboard" is needed for the Copy buttons: without it copy_text silently does nothing.
+eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
