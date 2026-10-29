@@ -9,6 +9,8 @@ Lag / hiccup diagnostics for online games on Windows. It started with THE FINALS
 
 Works on Wi-Fi and wired connections (on a cable, Wi-Fi events are ignored and the first hop is judged as a wired link). GPU temperatures, clock limits, power limit and PCIe link come from NVIDIA's NVML; on AMD and Intel graphics only GPU load is recorded (Windows' GPU engine counters). Frame times come from DXGI present events, so games that render with Vulkan or OpenGL without a DXGI swap chain show no frame data.
 
+**No install, any device:** [LagScope Pulse](https://lagscope.sevencooper.com) is a lag test for online games in the browser. In a few minutes it finds freezes, freezes on a timer, packet loss and jitter, with the same rules and "Good for" grades as this app (both use [lagscope-core](https://github.com/sevencooper/lagscope-core)). Use it for a quick check of the line; use LagScope to find the cause while you play.
+
 End-user instructions are in [README.txt](README.txt), which ships inside the release zip. **[How LagScope works](docs/HOW_IT_WORKS.md)** explains what is measured where, how a lag spike gets its verdict, and what the scorecard means.
 
 ```mermaid
